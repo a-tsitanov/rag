@@ -1,0 +1,4 @@
+Enterprise Knowledge Base
+
+This is a sample text document for testing.
+It has multiple lines.
