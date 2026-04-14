@@ -1,30 +1,10 @@
-from contextlib import asynccontextmanager
+"""Backwards-compatible entry-point.
 
-from fastapi import FastAPI
+The actual FastAPI app lives in :mod:`src.api.main` — import from there
+in new code.  This module only re-exports ``app`` so ``uvicorn
+src.main:app`` and existing Docker configs continue to work.
+"""
 
-from src.api.routes import documents, health, search
-from src.services.milvus import milvus_service
-from src.services.neo4j import neo4j_service
-from src.services.redis import redis_service
+from src.api.main import app
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await redis_service.connect()
-    await milvus_service.connect()
-    neo4j_service.connect()
-    yield
-    await redis_service.disconnect()
-    await milvus_service.disconnect()
-    neo4j_service.disconnect()
-
-
-app = FastAPI(
-    title="Enterprise Knowledge Base",
-    version="0.1.0",
-    lifespan=lifespan,
-)
-
-app.include_router(health.router)
-app.include_router(documents.router, prefix="/api/v1")
-app.include_router(search.router, prefix="/api/v1")
+__all__ = ["app"]

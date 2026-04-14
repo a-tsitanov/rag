@@ -1,27 +1,10 @@
-from lightrag import LightRAG, QueryParam
+"""Thin wrapper kept for backward compatibility.
 
-from src.config import settings
+The actual LightRAG singleton lives in ``src.retrieval.lightrag_setup``.
+This module re-exports ``get_rag`` so existing code that imported from
+``src.core.rag`` keeps working.
+"""
 
+from src.retrieval.lightrag_setup import get_rag
 
-class RAGEngine:
-    def __init__(self):
-        self.rag: LightRAG | None = None
-
-    async def initialize(self):
-        self.rag = LightRAG(working_dir=settings.lightrag_working_dir)
-
-    async def insert(self, text: str):
-        if self.rag is None:
-            await self.initialize()
-        await self.rag.ainsert(text)
-
-    async def query(self, question: str, mode: str = "hybrid") -> str:
-        if self.rag is None:
-            await self.initialize()
-        return await self.rag.aquery(
-            question,
-            param=QueryParam(mode=mode),
-        )
-
-
-rag_engine = RAGEngine()
+__all__ = ["get_rag"]

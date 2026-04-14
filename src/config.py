@@ -10,6 +10,19 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "info"
 
+    # API auth — comma-separated X-API-Keys
+    api_keys: str = "dev-key-change-me"
+    cors_origins: str = "*"  # comma-separated; "*" = allow all
+
+    @property
+    def api_keys_set(self) -> set[str]:
+        return {k.strip() for k in self.api_keys.split(",") if k.strip()}
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        origins = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        return origins or ["*"]
+
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
