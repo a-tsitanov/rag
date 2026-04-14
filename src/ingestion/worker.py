@@ -133,6 +133,8 @@ class AsyncDocumentWorker:
             for i in range(0, len(texts), self._batch_size):
                 batch = texts[i : i + self._batch_size]
                 vecs = self._embed_fn(batch)
+                if asyncio.iscoroutine(vecs):
+                    vecs = await vecs
                 all_embeddings.append(np.asarray(vecs, dtype=np.float32))
 
             embeddings = np.concatenate(all_embeddings, axis=0)

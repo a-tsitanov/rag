@@ -12,4 +12,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ src/
 
-CMD ["python", "-m", "src.ingestion.worker"]
+CMD ["python", "-m", "src.ingestion.run_worker"]
