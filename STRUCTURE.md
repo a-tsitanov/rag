@@ -159,14 +159,34 @@ embed(query) → Milvus.search(top_k*3, department filter)
 
 ## Переменные окружения (из `.env`)
 
-`APP_HOST` / `APP_PORT` / `APP_ENV` / `LOG_LEVEL`
-`API_KEYS` (csv) / `CORS_ORIGINS`
-`RABBITMQ_URL=amqp://guest:guest@localhost:5672/`
-`MILVUS_HOST` / `MILVUS_PORT=19530` / `MILVUS_COLLECTION=enterprise_kb`
-`NEO4J_URI=bolt://localhost:7687` / `NEO4J_USER` / `NEO4J_PASSWORD`
-`POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_HOST` / `POSTGRES_PORT`
-`OLLAMA_HOST=http://localhost:11434` / `OLLAMA_MODEL=llama3.1:8b` / `EMBEDDING_MODEL=nomic-embed-text` / `EMBEDDING_DIM=1024`
-`LIGHTRAG_WORKING_DIR=./data/lightrag` (+ внутри `lightrag_graph_storage` = `Neo4JStorage`)
+Группируются в `src/config.py` по отдельным `BaseSettings`, каждый со
+своим `env_prefix`. В коде:
+`settings.api.host`, `settings.milvus.host`, `settings.ollama.model`, ...
+
+| Группа (префикс) | Поля → env vars |
+|---|---|
+| **API_** (`settings.api`) | `API_HOST` / `API_PORT` / `API_ENV` / `API_LOG_LEVEL` / `API_KEYS` (csv) / `API_CORS_ORIGINS` |
+| **RABBITMQ_** (`settings.rabbitmq`) | `RABBITMQ_URL` / `RABBITMQ_TIMEOUT_S` |
+| **MILVUS_** (`settings.milvus`) | `MILVUS_HOST` / `MILVUS_PORT` / `MILVUS_COLLECTION` / `MILVUS_TIMEOUT_S` |
+| **NEO4J_** (`settings.neo4j`) | `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` / `NEO4J_TIMEOUT_S` |
+| **POSTGRES_** (`settings.postgres`) | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_CONNECT_TIMEOUT_S` |
+| **OLLAMA_** (`settings.ollama`) | `OLLAMA_HOST` / `OLLAMA_MODEL` / `OLLAMA_EMBEDDING_MODEL` / `OLLAMA_EMBEDDING_DIM` / `OLLAMA_TIMEOUT_S` |
+| **OPENAI_** (`settings.openai`) | `OPENAI_API_KEY` / `OPENAI_LLM_MODEL` |
+| **LIGHTRAG_** (`settings.lightrag`) | `LIGHTRAG_WORKING_DIR` / `LIGHTRAG_GRAPH_STORAGE` / `LIGHTRAG_LLM_MODEL` / `LIGHTRAG_EMBEDDING_MODEL` / `LIGHTRAG_EMBEDDING_DIM` / `LIGHTRAG_MAX_TOKEN_SIZE` |
+| **INGESTION_** (`settings.ingestion`) | `INGESTION_BATCH_SIZE` / `INGESTION_CHUNK_SIZE` / `INGESTION_CHUNK_OVERLAP` |
+
+Computed-property на корне: `effective_lightrag_llm_model` /
+`effective_lightrag_embedding_model` / `effective_lightrag_embedding_dim`
+— резолвят фолбэк "пусто → взять из `ollama.*`".
+
+## Docker compose файлы
+
+| Файл | Назначение |
+|---|---|
+| `docker-compose.yml` | Production-like. Поднимает все сервисы + контейнеры `api` и `worker` из `docker/Dockerfile*`. |
+| `docker-compose.dev.yml` | Локальная разработка. Только инфра (RabbitMQ / Milvus+etcd+MinIO / Neo4j / Postgres / Ollama + Attu UI). API и воркер запускаются из `.venv` через `.vscode/launch.json`. Порты биндятся на `127.0.0.1`, меньше heap у Neo4j, префикс проекта `enterprise-kb-dev` — volumes не конфликтуют с prod. |
+
+`docker compose -f docker-compose.dev.yml up -d` — поднять dev-стек.
 
 ## Известные расхождения с CLAUDE.md (aspirational → фактическое)
 

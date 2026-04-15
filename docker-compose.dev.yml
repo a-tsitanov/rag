@@ -1,0 +1,200 @@
+# Docker Compose для локальной разработки.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# Поднимает только инфраструктуру (RabbitMQ + Milvus + Neo4j + Postgres
+# + Ollama).  Приложение (uvicorn + taskiq worker) запускается из
+# .venv локально — см. .vscode/launch.json.
+#
+# Отличия от production docker-compose.yml:
+#   * нет сервисов api / worker — debug-сессии из IDE
+#   * отдельный префикс имени проекта (enterprise-kb-dev) через
+#     COMPOSE_PROJECT_NAME, так что volumes не конфликтуют с prod-compose
+#   * все порты биндятся на 127.0.0.1 (не слушаем 0.0.0.0)
+#   * сниженные resource-лимиты у Neo4j — локальной машине хватит
+#   * dev-friendly пароли в открытом виде
+#   * добавлен Attu UI для Milvus (http://localhost:8001)
+
+name: enterprise-kb-dev
+
+services:
+
+  # ── Milvus metadata ────────────────────────────────────────────────
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    container_name: kb-dev-etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    volumes:
+      - etcd_data:/etcd
+    command: >
+      etcd
+        -advertise-client-urls=http://127.0.0.1:2379
+        -listen-client-urls=http://0.0.0.0:2379
+        --data-dir=/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Milvus object storage ──────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: kb-dev-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio_data:/data
+    command: minio server /data --console-address ":9001"
+    ports:
+      - "127.0.0.1:19000:9000"  # S3 API
+      - "127.0.0.1:19001:9001"  # MinIO console
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Vector DB ──────────────────────────────────────────────────────
+  milvus:
+    image: milvusdb/milvus:v2.4.17
+    container_name: kb-dev-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "127.0.0.1:19530:19530"
+      - "127.0.0.1:9091:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Milvus UI ──────────────────────────────────────────────────────
+  attu:
+    image: zilliz/attu:latest
+    container_name: kb-dev-attu
+    environment:
+      MILVUS_URL: milvus:19530
+    ports:
+      - "127.0.0.1:8001:3000"  # http://localhost:8001
+    depends_on:
+      milvus:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Graph DB ───────────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5-enterprise
+    container_name: kb-dev-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme}
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
+      NEO4J_server_memory_heap_initial__size: "256m"
+      NEO4J_server_memory_heap_max__size: "512m"
+      NEO4J_server_memory_pagecache_size: "256m"
+    ports:
+      - "127.0.0.1:7474:7474"  # Browser UI
+      - "127.0.0.1:7687:7687"  # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Relational DB ──────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: kb-dev-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-enterprise_kb}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-enterprise_kb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── Queue: RabbitMQ + Management UI ────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: kb-dev-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "127.0.0.1:5672:5672"    # AMQP
+      - "127.0.0.1:15672:15672"  # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── LLM runtime ────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: kb-dev-ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    # GPU reservation — закомментируйте на macOS / без NVIDIA
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  neo4j_data:
+  neo4j_logs:
+  postgres_data:
+  rabbitmq_data:
+  ollama_data:

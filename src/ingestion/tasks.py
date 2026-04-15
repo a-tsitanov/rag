@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # ── broker ────────────────────────────────────────────────────────────
 
 broker = AioPikaBroker(
-    settings.rabbitmq_url,
+    settings.rabbitmq.url,
     qos=10,
     max_priority=10,
 ).with_middlewares(
@@ -48,15 +48,33 @@ broker = AioPikaBroker(
 
 
 # ── DI wiring (worker process only) ──────────────────────────────────
+#
+# NOTE: we cannot rely on ``broker.is_worker_process`` at module-import
+# time — the taskiq CLI only sets that flag *after* loading this module,
+# right before ``broker.startup()``.  Hooking WORKER_STARTUP is the
+# idiomatic way: the event fires exclusively on the worker side
+# (broker.startup() dispatches either CLIENT_STARTUP or WORKER_STARTUP
+# depending on the flag), and by then the dishka middleware can still
+# be registered before the broker begins consuming.
 
-if broker.is_worker_process:
+_container: "object | None" = None
+
+
+@broker.on_event(TaskiqEvents.WORKER_STARTUP)
+async def _wire_dishka(_state) -> None:
+    global _container
     _container = build_worker_container()
     setup_dishka(container=_container, broker=broker)
+    logger.info("dishka worker container wired into taskiq broker")
 
-    @broker.on_event(TaskiqEvents.WORKER_SHUTDOWN)
-    async def _close_container(_state) -> None:
+
+@broker.on_event(TaskiqEvents.WORKER_SHUTDOWN)
+async def _close_container(_state) -> None:
+    global _container
+    if _container is not None:
         logger.info("closing dishka worker container")
         await _container.close()
+        _container = None
 
 
 # ── task ──────────────────────────────────────────────────────────────

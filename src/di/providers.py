@@ -48,8 +48,13 @@ logger = logging.getLogger(__name__)
 _UPSERT_DOC = """
     INSERT INTO documents (id, path, status, department, error, processed_at)
     VALUES (
-        %(doc_id)s::uuid, %(path)s, %(status)s, %(department)s, %(error)s,
-        CASE WHEN %(status)s IN ('completed', 'failed') THEN now() END
+        %(doc_id)s::uuid,
+        %(path)s,
+        %(status)s::text,
+        %(department)s,
+        %(error)s,
+        CASE WHEN %(status)s::text IN ('completed', 'failed')
+             THEN now() END
     )
     ON CONFLICT (id) DO UPDATE SET
         path         = EXCLUDED.path,
@@ -85,10 +90,11 @@ class CommonProvider(Provider):
     @provide
     async def milvus(self, s: Settings) -> AsyncIterator[AsyncMilvusClient]:
         client = AsyncMilvusClient(
-            uri=f"http://{s.milvus_host}:{s.milvus_port}",
+            uri=f"http://{s.milvus.host}:{s.milvus.port}",
+            timeout=s.milvus.timeout_s,
         )
         await client.connect()
-        logger.info("milvus connected")
+        logger.info("milvus connected (timeout=%.1fs)", s.milvus.timeout_s)
         try:
             yield client
         finally:
@@ -97,10 +103,14 @@ class CommonProvider(Provider):
     @provide
     async def neo4j(self, s: Settings) -> AsyncIterator[AsyncNeo4jClient]:
         client = AsyncNeo4jClient(
-            uri=s.neo4j_uri, user=s.neo4j_user, password=s.neo4j_password,
+            uri=s.neo4j.uri, user=s.neo4j.user, password=s.neo4j.password,
+            connection_timeout=s.neo4j.timeout_s,
         )
         await client.connect()
-        logger.info("neo4j connected: %s", s.neo4j_uri)
+        logger.info(
+            "neo4j connected: %s (timeout=%.1fs)",
+            s.neo4j.uri, s.neo4j.timeout_s,
+        )
         try:
             yield client
         finally:
@@ -111,9 +121,14 @@ class CommonProvider(Provider):
         self, s: Settings,
     ) -> AsyncIterator[psycopg.AsyncConnection]:
         conn = await psycopg.AsyncConnection.connect(
-            s.postgres_dsn, autocommit=True,
+            s.postgres.dsn,
+            autocommit=True,
+            connect_timeout=s.postgres.connect_timeout_s,
         )
-        logger.info("postgres connected")
+        logger.info(
+            "postgres connected (connect_timeout=%ds)",
+            s.postgres.connect_timeout_s,
+        )
         try:
             yield conn
         finally:
@@ -137,7 +152,9 @@ class CommonProvider(Provider):
 
     @provide
     def ollama_client(self, s: Settings) -> ollama.AsyncClient:
-        return ollama.AsyncClient(host=s.ollama_host)
+        # ollama.AsyncClient forwards `timeout` to the underlying httpx
+        # client; applies to every embeddings / chat / generate call.
+        return ollama.AsyncClient(host=s.ollama.host, timeout=s.ollama.timeout_s)
 
     @provide
     def embed_fn(
@@ -147,7 +164,7 @@ class CommonProvider(Provider):
             vecs = []
             for t in texts:
                 resp = await ollama_client.embeddings(
-                    model=s.embedding_model, prompt=t,
+                    model=s.ollama.embedding_model, prompt=t,
                 )
                 vecs.append(resp["embedding"])
             return np.array(vecs, dtype=np.float32)
@@ -205,8 +222,8 @@ class WorkerProvider(Provider):
     async def lightrag(self, s: Settings) -> AsyncIterator[LightRAG]:
         # Worker writes the knowledge graph straight into Neo4j so
         # multiple worker replicas share the same graph.
-        rag = await create_rag(graph_storage=s.lightrag_graph_storage)
-        logger.info("lightrag ready (graph=%s)", s.lightrag_graph_storage)
+        rag = await create_rag(graph_storage=s.lightrag.graph_storage)
+        logger.info("lightrag ready (graph=%s)", s.lightrag.graph_storage)
         try:
             yield rag
         finally:
@@ -222,7 +239,9 @@ class WorkerProvider(Provider):
     @provide
     def milvus_writer(self, milvus: AsyncMilvusClient) -> MilvusWriter:
         async def _write(rows: list[dict]) -> None:
-            await asyncio.to_thread(
+            # Route through AsyncMilvusClient._run so the shared timeout
+            # applies here as well.
+            await milvus._run(
                 milvus._client.upsert,
                 collection_name=milvus._collection,
                 data=rows,

@@ -1,8 +1,8 @@
 """X-API-Key header auth.
 
-Keys are loaded from ``settings.api_keys`` (comma-separated in ``.env``).
-Apply via ``Depends(require_api_key)`` on any protected route or include
-in the ``dependencies=[...]`` of a router.
+Keys are loaded from ``settings.api.keys`` (comma-separated in
+``.env``).  Apply via ``Depends(require_api_key)`` on any protected
+route or include in the ``dependencies=[...]`` of a router.
 """
 
 from fastapi import HTTPException, Security, status
@@ -23,7 +23,7 @@ async def require_api_key(key: str | None = Security(_api_key_header)) -> str:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing X-API-Key header",
         )
-    if key not in settings.api_keys_set:
+    if key not in settings.api.keys_set:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid API key",

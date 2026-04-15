@@ -16,7 +16,7 @@ from src.config import settings
 
 def configure_logging() -> None:
     """Set up structlog + stdlib logging once at app startup."""
-    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    level = getattr(logging, settings.api.log_level.upper(), logging.INFO)
     logging.basicConfig(level=level, format="%(message)s")
 
     structlog.configure(
@@ -26,7 +26,7 @@ def configure_logging() -> None:
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.StackInfoRenderer(),
             structlog.dev.ConsoleRenderer()
-            if settings.app_env == "development"
+            if settings.api.env == "development"
             else structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),

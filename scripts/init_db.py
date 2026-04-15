@@ -8,19 +8,19 @@ from src.config import settings
 
 def init_milvus():
     client = MilvusClient(
-        uri=f"http://{settings.milvus_host}:{settings.milvus_port}"
+        uri=f"http://{settings.milvus.host}:{settings.milvus.port}"
     )
-    if client.has_collection(settings.milvus_collection):
-        print(f"Milvus collection '{settings.milvus_collection}' already exists")
+    if client.has_collection(settings.milvus.collection):
+        print(f"Milvus collection '{settings.milvus.collection}' already exists")
     else:
-        print(f"Milvus collection will be created on first insert")
+        print("Milvus collection will be created on first insert")
     client.close()
 
 
 def init_neo4j():
     driver = GraphDatabase.driver(
-        settings.neo4j_uri,
-        auth=(settings.neo4j_user, settings.neo4j_password),
+        settings.neo4j.uri,
+        auth=(settings.neo4j.user, settings.neo4j.password),
     )
     with driver.session() as session:
         session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE")

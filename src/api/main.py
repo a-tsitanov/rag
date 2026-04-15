@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     # startup dance if we happen to be imported from `taskiq worker`.
     if not broker.is_worker_process:
         await broker.startup()
-        logger.info("taskiq broker connected: %s", settings.rabbitmq_url)
+        logger.info("taskiq broker connected: %s", settings.rabbitmq.url)
     try:
         yield
     finally:
@@ -77,7 +77,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins_list,
+    allow_origins=settings.api.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -50,10 +50,18 @@ class AsyncNeo4jClient:
         uri: str | None = None,
         user: str | None = None,
         password: str | None = None,
+        *,
+        connection_timeout: float | None = None,
     ):
-        self._uri = uri or settings.neo4j_uri
-        self._user = user or settings.neo4j_user
-        self._password = password or settings.neo4j_password
+        self._uri = uri or settings.neo4j.uri
+        self._user = user or settings.neo4j.user
+        self._password = password or settings.neo4j.password
+        # 0 → без таймаута (драйвер воспримет как inf)
+        self._connection_timeout = (
+            connection_timeout
+            if connection_timeout is not None
+            else settings.neo4j.timeout_s
+        )
         self._driver = None
 
     async def connect(self):
@@ -61,6 +69,8 @@ class AsyncNeo4jClient:
             self._uri,
             auth=(self._user, self._password),
             max_connection_pool_size=50,
+            connection_timeout=self._connection_timeout,
+            max_transaction_retry_time=self._connection_timeout,
         )
         await self._ensure_constraints()
 

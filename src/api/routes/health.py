@@ -41,7 +41,8 @@ class HealthResponse(BaseModel):
 async def _check_rabbitmq(s: Settings) -> ServiceHealth:
     try:
         conn = await asyncio.wait_for(
-            aio_pika.connect(s.rabbitmq_url), timeout=3.0,
+            aio_pika.connect(s.rabbitmq.url),
+            timeout=s.rabbitmq.timeout_s,
         )
         try:
             return ServiceHealth(status="up")

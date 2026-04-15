@@ -44,7 +44,7 @@ def check_postgres() -> bool:
     try:
         import psycopg
 
-        with psycopg.connect(settings.postgres_dsn) as conn:
+        with psycopg.connect(settings.postgres.dsn) as conn:
             row = conn.execute("SELECT current_database(), version()").fetchone()
         db_name = row[0]
         pg_ver = row[1].split(",")[0]  # "PostgreSQL 16.x ..."
@@ -60,7 +60,7 @@ def check_milvus() -> bool:
         from pymilvus import MilvusClient
 
         client = MilvusClient(
-            uri=f"http://{settings.milvus_host}:{settings.milvus_port}"
+            uri=f"http://{settings.milvus.host}:{settings.milvus.port}"
         )
         version = client.get_server_version().lstrip("v")
         client.close()
@@ -76,8 +76,8 @@ def check_neo4j() -> bool:
         from neo4j import GraphDatabase
 
         driver = GraphDatabase.driver(
-            settings.neo4j_uri,
-            auth=(settings.neo4j_user, settings.neo4j_password),
+            settings.neo4j.uri,
+            auth=(settings.neo4j.user, settings.neo4j.password),
         )
         info = driver.get_server_info()
         driver.close()
@@ -89,13 +89,12 @@ def check_neo4j() -> bool:
 
 # ── 2. Milvus — collection ───────────────────────────────────────────
 
-VECTOR_DIM = 1024
 HNSW_M = 16
 HNSW_EF_CONSTRUCTION = 200
 
 
 def setup_milvus() -> bool:
-    collection = settings.milvus_collection
+    collection = settings.milvus.collection
     _step(collection)
     try:
         from pymilvus import (
@@ -106,7 +105,7 @@ def setup_milvus() -> bool:
         )
 
         client = MilvusClient(
-            uri=f"http://{settings.milvus_host}:{settings.milvus_port}"
+            uri=f"http://{settings.milvus.host}:{settings.milvus.port}"
         )
 
         if client.has_collection(collection):
@@ -128,7 +127,7 @@ def setup_milvus() -> bool:
                 FieldSchema(
                     name="embedding",
                     dtype=DataType.FLOAT_VECTOR,
-                    dim=VECTOR_DIM,
+                    dim=settings.ollama.embedding_dim,
                 ),
                 FieldSchema(
                     name="doc_id", dtype=DataType.VARCHAR, max_length=128
@@ -204,8 +203,8 @@ def setup_neo4j() -> bool:
     from neo4j.exceptions import ClientError, DatabaseError
 
     driver = GraphDatabase.driver(
-        settings.neo4j_uri,
-        auth=(settings.neo4j_user, settings.neo4j_password),
+        settings.neo4j.uri,
+        auth=(settings.neo4j.user, settings.neo4j.password),
     )
 
     all_ok = True
@@ -306,7 +305,7 @@ _PG_INDEXES = [
 def setup_postgres() -> bool:
     import psycopg
 
-    conn = psycopg.connect(settings.postgres_dsn, autocommit=True)
+    conn = psycopg.connect(settings.postgres.dsn, autocommit=True)
     all_ok = True
 
     for table_name, ddl in _PG_TABLES:
