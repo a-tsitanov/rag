@@ -79,8 +79,15 @@ async def create_rag(
 
     Path(wd).mkdir(parents=True, exist_ok=True)
 
+    # ``ollama_embed`` уже декорирован
+    # ``@wrap_embedding_func_with_attrs(embedding_dim=1024, ...)`` под BGE-M3,
+    # и его внутренний валидатор будет ругаться на любую dim ≠ 1024.
+    # Берём ``.func`` чтобы обойти вложенный wrapper — свой ``EmbeddingFunc``
+    # (ниже) проверит dim против настоящей размерности модели пользователя.
+    _ollama_embed_raw = getattr(ollama_embed, "func", ollama_embed)
+
     async def _embed(texts: list[str]) -> list:
-        return await ollama_embed(texts, embed_model=embed_name)
+        return await _ollama_embed_raw(texts, embed_model=embed_name)
 
     embedding_func = EmbeddingFunc(
         embedding_dim=embed_dim,
