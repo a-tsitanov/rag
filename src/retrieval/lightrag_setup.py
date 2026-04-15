@@ -1,21 +1,12 @@
-"""Singleton LightRAG instance wired to the project's storage backends.
+"""LightRAG factory + graph-storage env shims.
 
-LightRAG v1.0.0 API
---------------------
-* ``kg``                                  — graph storage name (str), looked up in an
-                                            internal dict; ``"Neo4JStorage"`` uses env-vars
-                                            ``NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD``.
-* ``vector_db_storage_cls``               — vector storage **class** (not string).
-* ``key_string_value_json_storage_cls``    — KV storage **class**.
-* ``llm_model_func``                      — async callable; receives model name through
-                                            ``global_config["llm_model_name"]``.
-* ``embedding_func``                      — ``EmbeddingFunc(embedding_dim, max_token_size, func)``.
+Public API is now a single pure factory :func:`create_rag` — it returns a
+fresh :class:`lightrag.LightRAG` instance without touching any module
+globals.  Lifecycle (teardown) is the caller's responsibility (the dishka
+provider does it via ``yield`` + ``close_rag_graph``).
 
-This module exposes:
-
-* ``init_rag()``  — call once at app startup (inside FastAPI lifespan).
-* ``close_rag()`` — call once at shutdown.
-* ``get_rag()``   — FastAPI dependency that returns the singleton.
+The old singleton triad (``init_rag`` / ``get_rag`` / ``close_rag``) was
+removed — a container now owns the instance.
 """
 
 from __future__ import annotations
@@ -28,16 +19,12 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── singleton state ───────────────────────────────────────────────────
 
-_rag_instance = None  # set by init_rag(), cleared by close_rag()
-
-
-# ── helpers: push our config into env-vars that LightRAG reads ────────
+# ── env-var bridges for LightRAG storage backends ────────────────────
 
 
 def _export_neo4j_env() -> None:
-    """Neo4JStorage reads NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD
+    """``Neo4JStorage`` reads ``NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD``
     from the process environment — not from constructor args."""
     os.environ.setdefault("NEO4J_URI", settings.neo4j_uri)
     os.environ.setdefault("NEO4J_USERNAME", settings.neo4j_user)
@@ -54,27 +41,22 @@ def _export_milvus_env() -> None:
 # ── factory ───────────────────────────────────────────────────────────
 
 
-async def init_rag(
+async def create_rag(
     *,
     working_dir: str | None = None,
     llm_model_name: str = "llama3.3:70b",
     embed_model: str = "bge-m3:latest",
     embedding_dim: int = 1024,
-    graph_storage: str = "Neo4JStorage",
-) -> None:
-    """Create the singleton :class:`LightRAG` and store it in module state.
+    graph_storage: str | None = None,
+):
+    """Build and return a fresh LightRAG instance.
 
-    Must be called exactly once — typically in the FastAPI lifespan.
+    Caller owns teardown.  For the Neo4j backend call
+    :func:`close_rag_graph` on the returned instance to close the driver.
     """
-    global _rag_instance
-
-    if _rag_instance is not None:
-        logger.warning("LightRAG already initialised — skipping")
-        return
-
-    # lazy import so the module is loadable without torch installed
+    # Lazy imports so this module is importable without torch.
     from lightrag import LightRAG
-    from lightrag.llm import ollama_model_complete, ollama_embedding
+    from lightrag.llm import ollama_embedding, ollama_model_complete
     from lightrag.utils import EmbeddingFunc
 
     _export_neo4j_env()
@@ -83,7 +65,6 @@ async def init_rag(
     wd = working_dir or settings.lightrag_working_dir
     Path(wd).mkdir(parents=True, exist_ok=True)
 
-    # ── embedding wrapper ─────────────────────────────────────────
     async def _embed(texts: list[str]) -> list:
         return await ollama_embedding(texts, embed_model=embed_model)
 
@@ -93,46 +74,36 @@ async def init_rag(
         func=_embed,
     )
 
-    # ── build instance ────────────────────────────────────────────
-    _rag_instance = LightRAG(
+    rag = LightRAG(
         working_dir=wd,
         llm_model_func=ollama_model_complete,
         llm_model_name=llm_model_name,
         embedding_func=embedding_func,
-        kg=graph_storage,
+        graph_storage=graph_storage or settings.lightrag_graph_storage,
     )
+
+    # LightRAG 1.4+ requires explicit storage initialization before any
+    # ainsert / aquery call.  It populates pipeline_status and opens the
+    # graph driver.
+    await rag.initialize_storages()
 
     logger.info(
-        "LightRAG initialised  working_dir=%s  llm=%s  embed=%s  graph=%s",
-        wd, llm_model_name, embed_model, graph_storage,
+        "LightRAG created  working_dir=%s  llm=%s  embed=%s  graph=%s",
+        wd, llm_model_name, embed_model,
+        graph_storage or settings.lightrag_graph_storage,
     )
+    return rag
 
 
-async def close_rag() -> None:
-    """Shut down the singleton (close graph driver, flush caches)."""
-    global _rag_instance
-    if _rag_instance is None:
-        return
+async def close_rag_graph(rag) -> None:
+    """Best-effort shutdown of LightRAG's graph driver (Neo4j).
 
+    NetworkX graphs write to disk on ``index_done_callback`` — no close
+    needed. Neo4j keeps a driver open that must be closed explicitly.
+    """
     try:
-        graph = _rag_instance.chunk_entity_relation_graph
-        if hasattr(graph, "close"):
+        graph = getattr(rag, "chunk_entity_relation_graph", None)
+        if graph is not None and hasattr(graph, "close"):
             await graph.close()
     except Exception as exc:
-        logger.warning("Error closing graph storage: %s", exc)
-
-    _rag_instance = None
-    logger.info("LightRAG shut down")
-
-
-# ── FastAPI dependency ────────────────────────────────────────────────
-
-
-def get_rag():
-    """FastAPI ``Depends(get_rag)`` — returns the singleton LightRAG."""
-    if _rag_instance is None:
-        raise RuntimeError(
-            "LightRAG not initialised. "
-            "Call init_rag() in your FastAPI lifespan first."
-        )
-    return _rag_instance
+        logger.warning("error closing LightRAG graph: %s", exc)

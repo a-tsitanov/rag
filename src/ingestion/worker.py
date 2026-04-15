@@ -99,13 +99,26 @@ class AsyncDocumentWorker:
 
     # ── public API ────────────────────────────────────────────────────
 
-    async def process_document(self, path: Path) -> ProcessResult:
-        doc_id = str(uuid.uuid4())
+    async def process_document(
+        self,
+        path: Path,
+        *,
+        doc_id: str | None = None,
+        department: str = "",
+    ) -> ProcessResult:
+        doc_id = doc_id or str(uuid.uuid4())
         path = Path(path)
         timings: list[StepTiming] = []
         chunks: list[Chunk] = []
 
         try:
+            # ── 0. mark processing ────────────────────────────────
+            await self._pg_status(
+                doc_id=doc_id, status="processing",
+                path=str(path), department=department,
+                doc_type="", error="",
+            )
+
             # ── 1. parse ──────────────────────────────────────────
             t0 = self._now()
             doc: ParsedDocument = self._parser.parse(path)
@@ -114,12 +127,13 @@ class AsyncDocumentWorker:
             if not doc.text:
                 raise ValueError(f"parser returned empty text for {path}")
 
-            department = doc.metadata.get("department", "")
+            # caller's department wins; fall back to parser-derived value
+            department = department or doc.metadata.get("department", "")
             doc_type = doc.metadata.get("doc_type", "")
 
             # ── 2. chunk ──────────────────────────────────────────
             t0 = self._now()
-            chunks = self._chunker.chunk(doc, doc_id=doc_id)
+            chunks = await self._chunker.chunk(doc, doc_id=doc_id)
             timings.append(StepTiming("chunk", self._now() - t0))
 
             if not chunks:
@@ -171,6 +185,7 @@ class AsyncDocumentWorker:
                 path=str(path),
                 department=department,
                 doc_type=doc_type,
+                error="",
             )
             timings.append(StepTiming("pg_status", self._now() - t0))
 
@@ -179,7 +194,8 @@ class AsyncDocumentWorker:
             try:
                 await self._pg_status(
                     doc_id=doc_id, status="failed",
-                    path=str(path), department="", doc_type="",
+                    path=str(path), department=department,
+                    doc_type="", error=str(exc),
                 )
             except Exception:
                 logger.warning("Could not update PG status for %s", doc_id)

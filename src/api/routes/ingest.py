@@ -1,27 +1,19 @@
 """POST /api/v1/ingest — upload document and enqueue for processing.
-GET  /api/v1/ingest/{job_id} — query job status."""
-
-from __future__ import annotations
+GET  /api/v1/ingest/{job_id} — query job status from Postgres."""
 
 import logging
 import uuid
 from pathlib import Path
 from typing import Literal
 
-from fastapi import (
-    APIRouter,
-    Depends,
-    File,
-    Form,
-    HTTPException,
-    Request,
-    UploadFile,
-    status,
-)
+import psycopg
+from dishka.integrations.fastapi import FromDishka, inject
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
 from src.api.auth import require_api_key
-from src.ingestion.queue import STATUS_PREFIX, DocumentProducer
+from src.ingestion.tasks import priority_value, process_document
+from src.ingestion.worker import PGStatusUpdater
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +34,9 @@ class IngestEnqueuedResponse(BaseModel):
 
 class JobProgressResponse(BaseModel):
     job_id: str
-    status: Literal["pending", "processing", "done", "failed", "unknown"]
+    status: Literal["pending", "processing", "completed", "failed", "unknown"]
     path: str | None = None
     department: str | None = None
-    priority: str | None = None
-    attempt: int = 0
     error: str | None = None
 
 
@@ -60,63 +50,73 @@ class JobProgressResponse(BaseModel):
     status_code=status.HTTP_202_ACCEPTED,
     summary="Upload a document and enqueue it for ingestion",
     description=(
-        "Saves the uploaded file to server-side storage and pushes a job "
-        "onto the Redis stream ``documents:pending``.  A worker will pick "
-        "it up asynchronously.  Poll `GET /ingest/{job_id}` for progress."
+        "Saves the uploaded file to server-side storage, inserts a "
+        "``documents`` row with ``status='pending'``, and kicks a "
+        "``process_document`` task onto RabbitMQ.  A taskiq worker will "
+        "pick it up asynchronously.  Poll ``GET /ingest/{job_id}`` for "
+        "progress."
     ),
     responses={
         401: {"description": "Missing X-API-Key"},
         403: {"description": "Invalid X-API-Key"},
-        503: {"description": "Queue backend unavailable"},
     },
 )
+@inject
 async def ingest(
-    request: Request,
+    pg_status: FromDishka[PGStatusUpdater],
     file: UploadFile = File(..., description="Document to ingest (PDF/DOCX/PPTX/TXT/MD/EML)"),
     department: str = Form("", description="Access-control group"),
     priority: Literal["low", "normal", "high"] = Form(
         "normal", description="Scheduling hint for the worker pool",
     ),
 ) -> IngestEnqueuedResponse:
-    redis = getattr(request.app.state, "redis", None)
-    if redis is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Redis unavailable",
-        )
-
     # persist upload
     safe_name = (file.filename or "upload.bin").replace("/", "_")
-    dest = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_name}"
+    doc_id = str(uuid.uuid4())
+    dest = UPLOAD_DIR / f"{doc_id}_{safe_name}"
     dest.write_bytes(await file.read())
     await file.close()
 
-    # enqueue
-    producer = DocumentProducer(redis)
-    job_id = await producer.add_document(
+    # insert pending row so GET /ingest/{id} has something to read
+    # even before the worker wakes up
+    await pg_status(
+        doc_id=doc_id,
+        status="pending",
         path=str(dest),
         department=department,
-        priority=priority,
+        error="",
+    )
+
+    # kick the task with priority label
+    await (
+        process_document.kicker()
+        .with_labels(priority=priority_value(priority))
+        .kiq(
+            doc_id=doc_id,
+            path=str(dest),
+            department=department,
+            priority=priority,
+        )
     )
 
     logger.info(
-        "ingest enqueued", extra={
-            "job_id": job_id, "path": str(dest),
+        "ingest enqueued",
+        extra={
+            "job_id": doc_id, "path": str(dest),
             "department": department, "priority": priority,
         },
     )
-    return IngestEnqueuedResponse(job_id=job_id, status="queued", path=str(dest))
+    return IngestEnqueuedResponse(job_id=doc_id, status="queued", path=str(dest))
 
 
 # ── GET /ingest/{job_id} ──────────────────────────────────────────────
 
 
-def _decode(data: dict) -> dict:
-    return {
-        (k.decode() if isinstance(k, bytes) else k):
-        (v.decode() if isinstance(v, bytes) else v)
-        for k, v in data.items()
-    }
+_SELECT_DOC = """
+    SELECT status, path, department, error
+    FROM documents
+    WHERE id = %s::uuid
+"""
 
 
 @router.get(
@@ -125,40 +125,42 @@ def _decode(data: dict) -> dict:
     dependencies=[Depends(require_api_key)],
     summary="Get ingestion job status",
     description=(
-        "Reads the Redis hash ``job:{job_id}`` and returns the full "
-        "progress record: current status, attempt count, last error "
-        "(if failed), and original submission metadata."
+        "Reads the ``documents`` row in Postgres and returns the current "
+        "status (``pending`` → ``processing`` → ``completed`` | "
+        "``failed``), the original path, the department, and the error "
+        "string (if failed)."
     ),
     responses={
         401: {"description": "Missing X-API-Key"},
         403: {"description": "Invalid X-API-Key"},
         404: {"description": "Job ID unknown"},
-        503: {"description": "Redis unavailable"},
     },
 )
-async def job_status(job_id: str, request: Request) -> JobProgressResponse:
-    redis = getattr(request.app.state, "redis", None)
-    if redis is None:
+@inject
+async def job_status(
+    job_id: str,
+    pg: FromDishka[psycopg.AsyncConnection],
+) -> JobProgressResponse:
+    try:
+        cur = await pg.execute(_SELECT_DOC, (job_id,))
+    except psycopg.errors.InvalidTextRepresentation as exc:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Redis unavailable",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invalid job_id: {exc}",
         )
 
-    raw = await redis.hgetall(f"{STATUS_PREFIX}{job_id}")
-    if not raw:
+    row = await cur.fetchone()
+    if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job {job_id} not found",
         )
 
-    d = _decode(raw)
-
+    db_status, path, department, error = row
     return JobProgressResponse(
         job_id=job_id,
-        status=d.get("status", "unknown"),  # type: ignore[arg-type]
-        path=d.get("path"),
-        department=d.get("department"),
-        priority=d.get("priority"),
-        attempt=int(d.get("attempt", 0)),
-        error=d.get("error"),
+        status=db_status,  # type: ignore[arg-type]
+        path=path,
+        department=department,
+        error=error,
     )

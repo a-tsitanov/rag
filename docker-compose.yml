@@ -109,19 +109,23 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # ── Queue: Redis 7 ─────────────────────────────────────────────────
-  redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+  # ── Queue: RabbitMQ 3 (+ Management UI at :15672) ──────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
     ports:
-      - "6379:6379"
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI
     volumes:
-      - redis_data:/data
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
   # ── LLM: Ollama ────────────────────────────────────────────────────
@@ -158,7 +162,7 @@ services:
       - ./src:/app/src
       - app_data:/app/data
     depends_on:
-      redis:
+      rabbitmq:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -170,7 +174,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ── App: Ingestion worker ──────────────────────────────────────────
+  # ── App: Ingestion worker (taskiq) ─────────────────────────────────
   worker:
     build:
       context: .
@@ -180,7 +184,7 @@ services:
       - ./src:/app/src
       - app_data:/app/data
     depends_on:
-      redis:
+      rabbitmq:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -199,6 +203,6 @@ volumes:
   neo4j_data:
   neo4j_logs:
   postgres_data:
-  redis_data:
+  rabbitmq_data:
   ollama_data:
   app_data:

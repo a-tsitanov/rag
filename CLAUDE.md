@@ -6,7 +6,7 @@
 - **Graph DB**: Neo4j Enterprise (порт 7687)
 - **Embedding**: BGE-M3 via ollama (порт 11434)
 - **LLM**: Llama 3.3 70B via ollama / vLLM (порт 11434)
-- **Queue**: Redis Streams (порт 6379)
+- **Queue**: RabbitMQ + taskiq (AMQP 5672, dashboard 15672)
 - **API**: FastAPI + uvicorn (порт 8000)
 - **Observability**: LangFuse self-hosted (порт 3000)
 
@@ -44,7 +44,7 @@ MILVUS_HOST, MILVUS_PORT=19530
 NEO4J_URI, NEO4J_PASSWORD
 OLLAMA_HOST=http://localhost:11434
 LANGFUSE_HOST=http://localhost:3000
-REDIS_URL=redis://localhost:6379
+RABBITMQ_URL=amqp://guest:guest@localhost:5672/
 
 ## Целевые метрики
 - Ingestion: 5000 документов/день

@@ -1,267 +1,146 @@
-"""Integration tests for DocumentQueue (Redis Streams).
+"""Tests for the ingestion task (taskiq).
 
-Requires a running Redis on localhost:6379.
-Tests are skipped automatically if Redis is unreachable.
+Uses ``taskiq.InMemoryBroker`` so the suite runs without RabbitMQ.
+Real AMQP round-trip is covered by the end-to-end smoke step in the
+migration plan.
 """
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 import pytest_asyncio
-import redis.asyncio as aioredis
-
-from src.ingestion.queue import (
-    CONSUMER_GROUP,
-    STATUS_PREFIX,
-    STREAM_FAILED,
-    STREAM_PENDING,
-    DocumentConsumer,
-    DocumentProducer,
-    Job,
-    JobStatus,
-    get_job_status,
-)
-
-REDIS_URL = "redis://localhost:6379/0"
-
-# ── unique stream names per test run (avoid collision) ────────────────
-
-_ORIG_PENDING = STREAM_PENDING
-_ORIG_FAILED = STREAM_FAILED
+from taskiq import InMemoryBroker
 
 
-def _patch_streams(suffix: str):
-    """Point module constants at test-specific stream names."""
-    import src.ingestion.queue as qmod
-
-    qmod.STREAM_PENDING = f"test:{suffix}:pending"
-    qmod.STREAM_FAILED = f"test:{suffix}:failed"
-    return qmod.STREAM_PENDING, qmod.STREAM_FAILED
+# ── fake backends ────────────────────────────────────────────────────
 
 
-def _restore_streams():
-    import src.ingestion.queue as qmod
+class FakePG:
+    def __init__(self):
+        self.docs: dict[str, dict] = {}
 
-    qmod.STREAM_PENDING = _ORIG_PENDING
-    qmod.STREAM_FAILED = _ORIG_FAILED
+    async def __call__(self, **kwargs) -> None:
+        self.docs[kwargs["doc_id"]] = kwargs
 
 
-# ── fixtures ──────────────────────────────────────────────────────────
+class FakeMilvusWriter:
+    def __init__(self):
+        self.rows: list[dict] = []
+
+    async def __call__(self, rows: list[dict]) -> None:
+        self.rows.extend(rows)
+
+
+class FakeLightRAG:
+    def __init__(self):
+        self.texts: list[str] = []
+
+    async def __call__(self, text: str) -> None:
+        self.texts.append(text)
+
+
+def _fake_embed(texts):
+    import numpy as np
+
+    return np.ones((len(texts), 1024), dtype="float32") / (1024 ** 0.5)
+
+
+# ── fixture: in-memory broker + ``process_document`` task ────────────
 
 
 @pytest_asyncio.fixture
-async def redis_conn():
-    """Yield a live Redis connection, skip if unavailable."""
-    r = aioredis.from_url(REDIS_URL, decode_responses=False)
+async def inmem_task():
+    """Wire an AsyncDocumentWorker (with fake backends) into an
+    InMemoryBroker-registered ``process_document`` task.
+
+    Yields ``(task, pg, milvus, lightrag)``.
+    """
+    from pathlib import Path
+
+    from src.ingestion.worker import AsyncDocumentWorker
+
+    pg = FakePG()
+    milvus = FakeMilvusWriter()
+    lightrag = FakeLightRAG()
+    worker = AsyncDocumentWorker(
+        embed_fn=_fake_embed,
+        milvus_writer=milvus,
+        lightrag_inserter=lightrag,
+        pg_status_updater=pg,
+    )
+
+    broker = InMemoryBroker()
+
+    @broker.task
+    async def process_document(
+        doc_id: str, path: str, department: str, priority: str,
+    ) -> None:
+        result = await worker.process_document(
+            Path(path), doc_id=doc_id, department=department,
+        )
+        if result.status == "failed":
+            raise RuntimeError(result.error or "processing failed")
+
+    await broker.startup()
     try:
-        await r.ping()
-    except Exception as exc:
-        pytest.skip(f"Redis unavailable: {exc}")
-    yield r
-    await r.aclose()
+        yield process_document, pg, milvus, lightrag
+    finally:
+        await broker.shutdown()
 
 
-@pytest_asyncio.fixture
-async def streams(redis_conn, request):
-    """Create test-scoped stream names and clean up afterwards."""
-    suffix = request.node.name
-    pending, failed = _patch_streams(suffix)
-
-    yield pending, failed
-
-    # cleanup
-    await redis_conn.delete(pending, failed)
-    # delete consumer group
-    try:
-        await redis_conn.xgroup_destroy(pending, CONSUMER_GROUP)
-    except Exception:
-        pass
-    # clean up status hashes created during the test
-    cursor = 0
-    while True:
-        cursor, keys = await redis_conn.scan(
-            cursor, match=f"{STATUS_PREFIX}*", count=200,
-        )
-        if keys:
-            await redis_conn.delete(*keys)
-        if cursor == 0:
-            break
-
-    _restore_streams()
-
-
-# ── producer ──────────────────────────────────────────────────────────
+# ── happy path ───────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_add_document_returns_job_id(redis_conn, streams):
-    producer = DocumentProducer(redis_conn)
-    job_id = await producer.add_document(
-        path="/data/report.pdf", department="engineering", priority="high",
+async def test_kick_completes_successfully(inmem_task, tmp_path):
+    task, pg, milvus, lightrag = inmem_task
+
+    sample = tmp_path / "hello.txt"
+    sample.write_text(
+        "The enterprise knowledge base ingests many document types. "
+        "We chunk text semantically and embed with BGE-M3."
     )
 
-    assert isinstance(job_id, str)
-    assert len(job_id) == 36  # UUID format
-
-    # status hash was created
-    status = await get_job_status(redis_conn, job_id)
-    assert status == JobStatus.pending
-
-
-@pytest.mark.asyncio
-async def test_multiple_documents_enqueued(redis_conn, streams):
-    pending_stream, _ = streams
-    producer = DocumentProducer(redis_conn)
-
-    ids = []
-    for i in range(5):
-        jid = await producer.add_document(
-            path=f"/data/doc_{i}.pdf", department="sales",
-        )
-        ids.append(jid)
-
-    assert len(set(ids)) == 5
-
-    # stream length matches
-    length = await redis_conn.xlen(pending_stream)
-    assert length == 5
-
-
-# ── consumer: happy path ──────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_consumer_reads_and_acks(redis_conn, streams):
-    producer = DocumentProducer(redis_conn)
-    consumer = DocumentConsumer(redis_conn, consumer_name="test-w1")
-
-    # enqueue
-    job_id = await producer.add_document(path="/data/a.pdf", department="hr")
-
-    # consume one message
-    received: list[Job] = []
-
-    async def _drain():
-        async for job in consumer.consume():
-            received.append(job)
-            await consumer.ack(job)
-            return  # exit after first
-
-    await asyncio.wait_for(_drain(), timeout=5)
-
-    assert len(received) == 1
-    assert received[0].job_id == job_id
-    assert received[0].path == "/data/a.pdf"
-    assert received[0].department == "hr"
-    assert received[0].attempt == 1
-
-    # status is done
-    status = await get_job_status(redis_conn, job_id)
-    assert status == JobStatus.done
-
-
-# ── consumer: retry + DLQ ─────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_fail_retries_then_dlq(redis_conn, streams):
-    _, failed_stream = streams
-    producer = DocumentProducer(redis_conn)
-    consumer = DocumentConsumer(
-        redis_conn, consumer_name="test-w2", max_retries=3, block_ms=1000,
+    doc_id = "11111111-1111-1111-1111-111111111111"
+    handle = await task.kiq(
+        doc_id=doc_id, path=str(sample),
+        department="demo", priority="normal",
     )
+    result = await handle.wait_result(timeout=10)
 
-    job_id = await producer.add_document(path="/data/bad.pdf")
-
-    attempts = 0
-
-    async def _consume_all():
-        nonlocal attempts
-        async for job in consumer.consume():
-            attempts += 1
-            await consumer.fail(job, error=f"error #{attempts}")
-            if attempts >= 3:
-                return
-
-    await asyncio.wait_for(_consume_all(), timeout=15)
-
-    assert attempts == 3
-
-    # status is failed
-    status = await get_job_status(redis_conn, job_id)
-    assert status == JobStatus.failed
-
-    # DLQ has the message
-    dlq_msgs = await redis_conn.xrange(failed_stream)
-    assert len(dlq_msgs) >= 1
-
-    last = dlq_msgs[-1][1]
-    # decode if bytes
-    last = {
-        (k.decode() if isinstance(k, bytes) else k):
-        (v.decode() if isinstance(v, bytes) else v)
-        for k, v in last.items()
-    }
-    assert last["job_id"] == job_id
-    assert last["attempts"] == "3"
-    assert "error" in last
+    assert result.is_err is False, getattr(result, "error", None)
+    assert pg.docs[doc_id]["status"] == "completed"
+    assert pg.docs[doc_id]["error"] in ("", None)
+    assert len(milvus.rows) >= 1
+    assert lightrag.texts == [sample.read_text()]
 
 
-# ── three concurrent consumers ────────────────────────────────────────
+# ── failure path ─────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_three_consumers_share_workload(redis_conn, streams):
-    producer = DocumentProducer(redis_conn)
+async def test_kick_failure_writes_error(inmem_task):
+    task, pg, _milvus, _rag = inmem_task
 
-    n_jobs = 9
-    for i in range(n_jobs):
-        await producer.add_document(path=f"/data/doc_{i}.txt", department="ops")
-
-    consumed_by: dict[str, list[str]] = {}
-
-    async def _worker(name: str, count: int):
-        consumer = DocumentConsumer(
-            redis_conn, consumer_name=name, block_ms=1000,
-        )
-        done = 0
-        async for job in consumer.consume():
-            consumed_by.setdefault(name, []).append(job.job_id)
-            await consumer.ack(job)
-            done += 1
-            if done >= count:
-                return
-
-    # 3 consumers, each tries to grab 3
-    await asyncio.wait_for(
-        asyncio.gather(
-            _worker("w-0", 3),
-            _worker("w-1", 3),
-            _worker("w-2", 3),
-        ),
-        timeout=10,
+    doc_id = "22222222-2222-2222-2222-222222222222"
+    handle = await task.kiq(
+        doc_id=doc_id, path="/tmp/no_such_file_abcdef.pdf",
+        department="", priority="low",
     )
+    result = await handle.wait_result(timeout=10)
 
-    all_ids = [jid for ids in consumed_by.values() for jid in ids]
-    assert len(all_ids) == n_jobs
-    assert len(set(all_ids)) == n_jobs  # no duplicates
-
-    # each consumer got some work (not all to one)
-    assert len(consumed_by) >= 2, (
-        f"Expected ≥2 consumers to receive work, got: {list(consumed_by.keys())}"
-    )
-
-    # all jobs are done
-    for jid in all_ids:
-        assert await get_job_status(redis_conn, jid) == JobStatus.done
+    assert result.is_err is True
+    assert pg.docs[doc_id]["status"] == "failed"
+    assert pg.docs[doc_id]["error"]
 
 
-# ── get_job_status for unknown job ────────────────────────────────────
+# ── priority mapping ─────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_get_status_unknown_job(redis_conn, streams):
-    status = await get_job_status(redis_conn, "nonexistent-id")
-    assert status is None
+def test_priority_value_mapping():
+    from src.ingestion.tasks import priority_value
+
+    assert priority_value("low") == 0
+    assert priority_value("normal") == 5
+    assert priority_value("high") == 9
+    assert priority_value("bogus") == 5  # fallback

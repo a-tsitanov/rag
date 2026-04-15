@@ -23,8 +23,8 @@ class Settings(BaseSettings):
         origins = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
         return origins or ["*"]
 
-    # Redis
-    redis_url: str = "redis://localhost:6379/0"
+    # RabbitMQ (task broker)
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
 
     # Milvus
     milvus_host: str = "localhost"
@@ -62,9 +62,9 @@ class Settings(BaseSettings):
 
     # LightRAG
     lightrag_working_dir: str = "./data/lightrag"
+    lightrag_graph_storage: str = "Neo4JStorage"  # or "NetworkXStorage"
 
     # Ingestion
-    ingestion_queue: str = "ingestion:tasks"
     ingestion_batch_size: int = 10
     chunk_size: int = 512
     chunk_overlap: int = 50

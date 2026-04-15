@@ -14,6 +14,7 @@ Algorithm
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -238,7 +239,7 @@ class SemanticChunker:
 
     # ── public API ────────────────────────────────────────────────────
 
-    def chunk(self, doc: ParsedDocument, doc_id: str = "") -> list[Chunk]:
+    async def chunk(self, doc: ParsedDocument, doc_id: str = "") -> list[Chunk]:
         if not doc_id:
             doc_id = str(uuid.uuid4())
 
@@ -249,8 +250,11 @@ class SemanticChunker:
         sentences = [s for s, _ in tagged]
         titles = [t for _, t in tagged]
 
-        # step 2: embed
-        embeddings = np.asarray(self._embed_fn(sentences), dtype=np.float32)
+        # step 2: embed (supports sync or async embed_fn)
+        vecs = self._embed_fn(sentences)
+        if asyncio.iscoroutine(vecs):
+            vecs = await vecs
+        embeddings = np.asarray(vecs, dtype=np.float32)
 
         # step 3: group
         groups = self._group(sentences, embeddings, titles)

@@ -5,8 +5,15 @@ from __future__ import annotations
 import asyncio
 from typing import Literal
 
-from fastapi import APIRouter, Request
+import aio_pika
+from dishka.integrations.fastapi import FromDishka, inject
+from fastapi import APIRouter
+from lightrag import LightRAG
 from pydantic import BaseModel, Field
+
+from src.config import Settings
+from src.storage.milvus_client import AsyncMilvusClient
+from src.storage.neo4j_client import AsyncNeo4jClient
 
 router = APIRouter(tags=["health"])
 
@@ -31,21 +38,20 @@ class HealthResponse(BaseModel):
 # ── per-service checks ───────────────────────────────────────────────
 
 
-async def _check_redis(r) -> ServiceHealth:
-    if r is None:
-        return ServiceHealth(status="down", detail="not initialised")
+async def _check_rabbitmq(s: Settings) -> ServiceHealth:
     try:
-        await r.ping()
-        info = await r.info("server")
-        ver = info.get("redis_version") if isinstance(info, dict) else None
-        return ServiceHealth(status="up", detail=f"v{ver}" if ver else None)
+        conn = await asyncio.wait_for(
+            aio_pika.connect(s.rabbitmq_url), timeout=3.0,
+        )
+        try:
+            return ServiceHealth(status="up")
+        finally:
+            await conn.close()
     except Exception as exc:
         return ServiceHealth(status="down", detail=str(exc))
 
 
-async def _check_milvus(m) -> ServiceHealth:
-    if m is None:
-        return ServiceHealth(status="down", detail="not initialised")
+async def _check_milvus(m: AsyncMilvusClient) -> ServiceHealth:
     try:
         version = await asyncio.to_thread(m._client.get_server_version)
         return ServiceHealth(status="up", detail=str(version))
@@ -53,9 +59,7 @@ async def _check_milvus(m) -> ServiceHealth:
         return ServiceHealth(status="down", detail=str(exc))
 
 
-async def _check_neo4j(n) -> ServiceHealth:
-    if n is None:
-        return ServiceHealth(status="down", detail="not initialised")
+async def _check_neo4j(n: AsyncNeo4jClient) -> ServiceHealth:
     try:
         await n._driver.verify_connectivity()
         return ServiceHealth(status="up")
@@ -63,12 +67,8 @@ async def _check_neo4j(n) -> ServiceHealth:
         return ServiceHealth(status="down", detail=str(exc))
 
 
-async def _check_lightrag(rag) -> ServiceHealth:
-    if rag is None:
-        return ServiceHealth(status="down", detail="not initialised")
+async def _check_lightrag(rag: LightRAG) -> ServiceHealth:
     try:
-        # NetworkXStorage keeps `_graph`; Neo4JStorage keeps `_driver`.
-        # We only validate the object exists and has an ainsert method.
         assert hasattr(rag, "ainsert")
         return ServiceHealth(status="up")
     except Exception as exc:
@@ -88,22 +88,21 @@ async def _check_lightrag(rag) -> ServiceHealth:
         "API key required."
     ),
 )
-async def health(request: Request) -> HealthResponse:
-    state = request.app.state
-
-    redis, milvus, neo4j, lightrag = await asyncio.gather(
-        _check_redis(getattr(state, "redis", None)),
-        _check_milvus(getattr(state, "milvus", None)),
-        _check_neo4j(getattr(state, "neo4j", None)),
-        _check_lightrag(getattr(state, "rag", None)),
+@inject
+async def health(
+    settings: FromDishka[Settings],
+    milvus: FromDishka[AsyncMilvusClient],
+    neo4j: FromDishka[AsyncNeo4jClient],
+    rag: FromDishka[LightRAG],
+) -> HealthResponse:
+    rmq, m, n, rg = await asyncio.gather(
+        _check_rabbitmq(settings),
+        _check_milvus(milvus),
+        _check_neo4j(neo4j),
+        _check_lightrag(rag),
     )
 
-    services = {
-        "redis": redis,
-        "milvus": milvus,
-        "neo4j": neo4j,
-        "lightrag": lightrag,
-    }
+    services = {"rabbitmq": rmq, "milvus": m, "neo4j": n, "lightrag": rg}
 
     down = [s for s in services.values() if s.status == "down"]
     if not down:

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Setup all databases for Enterprise Knowledge Base.
 
-Checks connectivity and creates schemas for Milvus, Neo4j, PostgreSQL, Redis.
-Run after: docker compose up -d redis postgres milvus neo4j
+Checks connectivity and creates schemas for Milvus, Neo4j, PostgreSQL.
+Run after: docker compose up -d rabbitmq postgres milvus neo4j
 """
 
 import sys
@@ -37,22 +37,6 @@ def _section(num: int, title: str):
 
 
 # ── 1. Connectivity checks ───────────────────────────────────────────
-
-
-def check_redis() -> bool:
-    _step("Redis")
-    try:
-        import redis
-
-        r = redis.from_url(settings.redis_url, decode_responses=True)
-        r.ping()
-        info = r.info("server")
-        version = info.get("redis_version", "?")
-        r.close()
-        _ok(f"v{version}")
-        return True
-    except Exception as e:
-        return _fail(e)
 
 
 def check_postgres() -> bool:
@@ -276,6 +260,7 @@ _PG_TABLES = [
             path          TEXT         NOT NULL,
             status        VARCHAR(32)  NOT NULL DEFAULT 'pending',
             department    VARCHAR(64),
+            error         TEXT,
             created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
             processed_at  TIMESTAMPTZ
         )
@@ -292,6 +277,13 @@ _PG_TABLES = [
             chunk_metadata  JSONB    NOT NULL DEFAULT '{}'::jsonb
         )
         """,
+    ),
+]
+
+_PG_MIGRATIONS = [
+    (
+        "documents.error column",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS error TEXT",
     ),
 ]
 
@@ -331,6 +323,15 @@ def setup_postgres() -> bool:
             _fail(e)
             all_ok = False
 
+    for label, ddl in _PG_MIGRATIONS:
+        _step(label)
+        try:
+            conn.execute(ddl)
+            _ok()
+        except Exception as e:
+            _fail(e)
+            all_ok = False
+
     for idx_name, ddl in _PG_INDEXES:
         _step(idx_name)
         try:
@@ -354,7 +355,6 @@ def main() -> int:
     # 1. connectivity
     _section(1, "Checking connections")
     services = {
-        "Redis": check_redis,
         "PostgreSQL": check_postgres,
         "Milvus": check_milvus,
         "Neo4j": check_neo4j,
@@ -364,7 +364,7 @@ def main() -> int:
 
     if failed:
         print(f"\n   Cannot reach: {', '.join(failed)}")
-        print("   Start services: docker compose up -d redis postgres milvus neo4j")
+        print("   Start services: docker compose up -d rabbitmq postgres milvus neo4j")
         return 1
 
     # 2. Milvus

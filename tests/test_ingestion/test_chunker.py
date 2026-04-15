@@ -82,10 +82,11 @@ def _make_long_doc(n_repeats: int = 5) -> ParsedDocument:
 # ── basic structure ───────────────────────────────────────────────────
 
 
-def test_chunk_returns_list_of_chunks():
+@pytest.mark.asyncio
+async def test_chunk_returns_list_of_chunks():
     doc = _make_long_doc()
     chunker = SemanticChunker(embed_fn=_deterministic_embed)
-    chunks = chunker.chunk(doc, doc_id="test-doc")
+    chunks = await chunker.chunk(doc, doc_id="test-doc")
 
     assert isinstance(chunks, list)
     assert len(chunks) >= 1
@@ -102,7 +103,8 @@ def test_chunk_returns_list_of_chunks():
 # ── token budget ──────────────────────────────────────────────────────
 
 
-def test_raw_group_tokens_within_budget():
+@pytest.mark.asyncio
+async def test_raw_group_tokens_within_budget():
     """Each chunk's *original* sentences (before overlap) ≤ max_tokens."""
     doc = _make_long_doc(n_repeats=8)
     chunker = SemanticChunker(
@@ -110,7 +112,7 @@ def test_raw_group_tokens_within_budget():
         max_tokens=512,
         overlap=0,  # disable overlap so content = raw group
     )
-    chunks = chunker.chunk(doc, doc_id="budget")
+    chunks = await chunker.chunk(doc, doc_id="budget")
 
     assert len(chunks) >= 2, "document should be long enough to split"
     for c in chunks:
@@ -123,14 +125,15 @@ def test_raw_group_tokens_within_budget():
 # ── overlap ───────────────────────────────────────────────────────────
 
 
-def test_overlap_between_consecutive_chunks():
+@pytest.mark.asyncio
+async def test_overlap_between_consecutive_chunks():
     doc = _make_long_doc(n_repeats=8)
     chunker = SemanticChunker(
         embed_fn=_identical_embed,
         max_tokens=512,
         overlap=50,
     )
-    chunks = chunker.chunk(doc, doc_id="overlap")
+    chunks = await chunker.chunk(doc, doc_id="overlap")
 
     assert len(chunks) >= 2
 
@@ -151,7 +154,8 @@ def test_overlap_between_consecutive_chunks():
 # ── section titles ────────────────────────────────────────────────────
 
 
-def test_section_titles_preserved():
+@pytest.mark.asyncio
+async def test_section_titles_preserved():
     doc = ParsedDocument(
         text="",
         metadata={},
@@ -165,7 +169,7 @@ def test_section_titles_preserved():
         max_tokens=512,
         overlap=0,
     )
-    chunks = chunker.chunk(doc, doc_id="sec")
+    chunks = await chunker.chunk(doc, doc_id="sec")
 
     assert len(chunks) >= 1
     titles = {c.section_title for c in chunks}
@@ -175,22 +179,24 @@ def test_section_titles_preserved():
 # ── empty document ────────────────────────────────────────────────────
 
 
-def test_empty_document_returns_no_chunks():
+@pytest.mark.asyncio
+async def test_empty_document_returns_no_chunks():
     doc = ParsedDocument(text="", metadata={}, sections=[])
     chunker = SemanticChunker(embed_fn=_deterministic_embed)
-    assert chunker.chunk(doc) == []
+    assert await chunker.chunk(doc) == []
 
 
 # ── real PDF fixture ──────────────────────────────────────────────────
 
 
-def test_chunk_real_pdf():
+@pytest.mark.asyncio
+async def test_chunk_real_pdf():
     """Parse the PDF fixture, chunk it, and print the chunks."""
     parser = DocumentParser()
     doc = parser.parse(FIXTURES / "sample.pdf")
 
     chunker = SemanticChunker(embed_fn=_deterministic_embed, max_tokens=512, overlap=50)
-    chunks = chunker.chunk(doc, doc_id="pdf-sample")
+    chunks = await chunker.chunk(doc, doc_id="pdf-sample")
 
     assert len(chunks) >= 1
 
@@ -213,12 +219,13 @@ def test_chunk_real_pdf():
 # ── real DOCX fixture ────────────────────────────────────────────────
 
 
-def test_chunk_real_docx():
+@pytest.mark.asyncio
+async def test_chunk_real_docx():
     parser = DocumentParser()
     doc = parser.parse(FIXTURES / "sample.docx")
 
     chunker = SemanticChunker(embed_fn=_deterministic_embed, max_tokens=512, overlap=50)
-    chunks = chunker.chunk(doc, doc_id="docx-sample")
+    chunks = await chunker.chunk(doc, doc_id="docx-sample")
 
     assert len(chunks) >= 1
 
@@ -230,14 +237,15 @@ def test_chunk_real_docx():
 # ── doc_id auto-generated when omitted ────────────────────────────────
 
 
-def test_doc_id_auto_generated():
+@pytest.mark.asyncio
+async def test_doc_id_auto_generated():
     doc = ParsedDocument(
         text="One sentence.",
         metadata={},
         sections=[Section(title="T", content="One sentence.", level=0)],
     )
     chunker = SemanticChunker(embed_fn=_deterministic_embed)
-    chunks = chunker.chunk(doc)
+    chunks = await chunker.chunk(doc)
 
     assert len(chunks) == 1
     assert chunks[0].doc_id  # non-empty UUID

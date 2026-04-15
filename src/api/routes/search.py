@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from dishka.integrations.fastapi import FromDishka, inject
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from src.api.auth import require_api_key
 from src.models.search import SearchRequest, SearchResponse
+from src.retrieval.hybrid_search import HybridSearcher
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +34,14 @@ router = APIRouter(tags=["search"])
     responses={
         401: {"description": "Missing X-API-Key"},
         403: {"description": "Invalid X-API-Key"},
-        503: {"description": "Search subsystem unavailable"},
+        500: {"description": "Downstream (Ollama / RAG) failure"},
     },
 )
-async def search(req: SearchRequest, request: Request) -> SearchResponse:
-    searcher = getattr(request.app.state, "searcher", None)
-    if searcher is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Search subsystem is not initialised "
-            "(check /health for backend status).",
-        )
-
+@inject
+async def search(
+    req: SearchRequest,
+    searcher: FromDishka[HybridSearcher],
+) -> SearchResponse:
     try:
         return await searcher.search(
             query=req.query,

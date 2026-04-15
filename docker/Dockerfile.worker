@@ -12,4 +12,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ src/
 
-CMD ["python", "-m", "src.ingestion.run_worker"]
+CMD ["taskiq", "worker", "src.ingestion.tasks:broker", "--workers", "1", "--max-async-tasks", "5"]
