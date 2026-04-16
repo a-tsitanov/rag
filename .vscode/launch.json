@@ -1,0 +1,54 @@
+{
+    // Debug configs for Enterprise KB.
+    //
+    //   "FastAPI (uvicorn)"  → runs the HTTP API with debugpy.
+    //   "Taskiq worker"      → runs `taskiq worker` with subprocess follow.
+    //   "API + Worker"       → compound: both at once, stopAll on Stop.
+    //
+    // Prereqs:
+    //   - .venv interpreter selected in VS Code (Python extension auto-picks)
+    //   - docker compose up -d rabbitmq postgres milvus neo4j ollama
+    //   - .env populated (RABBITMQ_URL, POSTGRES_*, etc.)
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "FastAPI (uvicorn)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "src.api.main:app",
+                "--host", "127.0.0.1",
+                "--port", "8000"
+            ],
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Taskiq worker",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "taskiq",
+            "args": [
+                "worker",
+                "src.ingestion.tasks:broker",
+                "--workers", "1",
+                "--max-async-tasks", "5"
+            ],
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal",
+            "subProcess": true,
+            "justMyCode": false
+        }
+    ],
+    "compounds": [
+        {
+            "name": "API + Worker",
+            "configurations": ["FastAPI (uvicorn)", "Taskiq worker"],
+            "stopAll": true
+        }
+    ]
+}
