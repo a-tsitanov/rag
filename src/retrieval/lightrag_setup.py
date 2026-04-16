@@ -24,17 +24,21 @@ logger = logging.getLogger(__name__)
 
 
 def _export_neo4j_env() -> None:
-    """``Neo4JStorage`` reads ``NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD``
-    from the process environment — not from constructor args."""
-    os.environ.setdefault("NEO4J_URI", settings.neo4j.uri)
-    os.environ.setdefault("NEO4J_USERNAME", settings.neo4j.user)
-    os.environ.setdefault("NEO4J_PASSWORD", settings.neo4j.password)
+    """``Neo4JStorage`` в LightRAG 1.4 читает креды **только** из
+    ``os.environ`` — конструктор-kwargs для URI/USERNAME/PASSWORD нет.
+
+    Используем прямое присвоение (не ``setdefault``), чтобы наши
+    значения из ``Settings`` перекрывали возможные устаревшие env-vars
+    от предыдущих процессов / docker-переопределений.
+    """
+    os.environ["NEO4J_URI"] = settings.neo4j.uri
+    os.environ["NEO4J_USERNAME"] = settings.neo4j.user
+    os.environ["NEO4J_PASSWORD"] = settings.neo4j.password
 
 
 def _export_milvus_env() -> None:
-    os.environ.setdefault(
-        "MILVUS_URI",
-        f"http://{settings.milvus.host}:{settings.milvus.port}",
+    os.environ["MILVUS_URI"] = (
+        f"http://{settings.milvus.host}:{settings.milvus.port}"
     )
 
 

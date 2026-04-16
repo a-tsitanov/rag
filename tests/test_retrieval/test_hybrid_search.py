@@ -16,11 +16,7 @@ import pytest
 import pytest_asyncio
 
 from src.models.search import SearchResponse, SourceCitation
-from src.retrieval.hybrid_search import (
-    HybridSearcher,
-    init_searcher,
-    search as module_search,
-)
+from src.retrieval.hybrid_search import HybridSearcher
 from src.storage.milvus_client import AsyncMilvusClient, Document
 
 # ── deterministic helpers ─────────────────────────────────────────────
@@ -256,31 +252,6 @@ async def test_chunk_position_parsed(milvus, stub_rag):
 
     positions = {s.position for s in resp.sources}
     assert positions == {0, 1, 2}
-
-
-# ── module-level singleton helper ────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_module_search_requires_init():
-    """Calling `search(...)` without init_searcher should raise."""
-    import src.retrieval.hybrid_search as mod
-    mod._searcher = None
-
-    with pytest.raises(RuntimeError, match="not initialised"):
-        await module_search(query="x")
-
-
-@pytest.mark.asyncio
-async def test_module_search_after_init(searcher):
-    init_searcher(searcher)
-    try:
-        resp = await module_search(query="kubernetes", top_k=3)
-        assert resp.answer
-        assert len(resp.sources) <= 3
-    finally:
-        import src.retrieval.hybrid_search as mod
-        mod._searcher = None
 
 
 # ── empty-result safety ───────────────────────────────────────────────

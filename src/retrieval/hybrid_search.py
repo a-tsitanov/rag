@@ -206,32 +206,3 @@ class HybridSearcher:
         )
 
 
-# ── convenience: module-level singleton + function ────────────────────
-
-_searcher: HybridSearcher | None = None
-
-
-def init_searcher(searcher: HybridSearcher) -> None:
-    global _searcher
-    _searcher = searcher
-
-
-async def search(
-    query: str,
-    mode: SearchMode = "hybrid",
-    department: str | None = None,
-    top_k: int = 10,
-    user_id: str | None = None,
-) -> SearchResponse:
-    if _searcher is None:
-        raise RuntimeError(
-            "HybridSearcher singleton not initialised.  "
-            "Call init_searcher(HybridSearcher(...)) at app startup."
-        )
-    return await _searcher.search(
-        query=query,
-        mode=mode,
-        department=department,
-        top_k=top_k,
-        user_id=user_id,
-    )

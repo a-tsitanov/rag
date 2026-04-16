@@ -21,12 +21,12 @@ BASE_URL="${BASE_URL:-http://127.0.0.1:8000}"
 API_KEY="${API_KEY:-dev-local-key}"
 SAMPLE_FILE="${SAMPLE_FILE:-tests/test_ingestion/fixtures/sample.txt}"
 
-# jq доступен? иначе плоский вывод
-if command -v jq >/dev/null 2>&1; then
-  JQ="jq"
-else
-  JQ="cat"
+# jq теперь обязателен — используем его и для форматирования, и для парсинга
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq not found. install via 'brew install jq' or 'apt-get install jq'" >&2
+  exit 2
 fi
+JQ="jq"
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -66,8 +66,8 @@ smoke_ingest() {
   echo "$response" | $JQ
 
   local job_id
-  job_id=$(echo "$response" | sed -E 's/.*"job_id":"([^"]+)".*/\1/')
-  if [[ "$job_id" == "$response" ]] || [[ -z "$job_id" ]]; then
+  job_id=$(echo "$response" | jq -r '.job_id // empty')
+  if [[ -z "$job_id" || "$job_id" == "null" ]]; then
     echo "could not extract job_id from response" >&2
     return 1
   fi

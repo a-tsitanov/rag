@@ -12,6 +12,8 @@ Every env var follows ``<PREFIX>_<FIELD>``, e.g. ``MILVUS_HOST``,
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -38,6 +40,10 @@ class ApiSettings(BaseSettings):
     log_level: str = "info"
     keys: str = "dev-key-change-me"
     cors_origins: str = "*"
+    # Директория для загруженных файлов. Обязательно должна быть смонтирована
+    # как shared volume между контейнерами api и worker в docker-compose —
+    # worker читает тот же путь, что API записал.
+    upload_dir: Path = Path("./data/uploads")
 
     @property
     def keys_set(self) -> set[str]:
@@ -56,6 +62,11 @@ class MilvusSettings(BaseSettings):
     port: int = 19530
     collection: str = "enterprise_kb"
     timeout_s: float = 10.0
+    # Размер выделенного ThreadPoolExecutor'а, в котором крутятся
+    # блокирующие pymilvus-вызовы. Ограничиваем, чтобы при флапах Milvus
+    # (когда `asyncio.wait_for` срабатывает, но сам thread ещё не
+    # вернулся) не копились зомби-threads в default-executor'e.
+    pool_size: int = 8
 
 
 class Neo4jSettings(BaseSettings):

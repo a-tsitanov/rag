@@ -1,33 +1,30 @@
+"""Async wrapper вокруг pymilvus.MilvusClient.
+
+Особенности:
+* Блокирующие pymilvus-вызовы уезжают в **выделенный** ThreadPoolExecutor
+  с ограниченным ``pool_size`` — default-executor не засоряется зомби-
+  threads при флапах Milvus (когда ``asyncio.wait_for`` стрельнул, но
+  сам thread ещё держит соединение).
+* Retry политика здесь НЕ выставлена: retries делает taskiq на уровне
+  всей задачи ingestion, чтобы не было двойного ретрая (tenacity 3× ×
+  taskiq 2×). Первая ошибка storage — сразу наверх.
+"""
+
+from __future__ import annotations
+
 import asyncio
-import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from loguru import logger
 from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
-from pymilvus.exceptions import MilvusException
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from src.config import settings
-
-logger = logging.getLogger(__name__)
 
 HNSW_M = 16
 HNSW_EF_CONSTRUCTION = 200
 
 _OUTPUT_FIELDS = ["content", "doc_id", "department", "doc_type", "created_at"]
-
-_retry_milvus = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type((MilvusException, ConnectionError)),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
 
 
 @dataclass
@@ -52,7 +49,7 @@ class SearchResult:
 
 
 class AsyncMilvusClient:
-    """Async wrapper around pymilvus MilvusClient with HNSW index and retry."""
+    """Async wrapper around pymilvus MilvusClient with HNSW index."""
 
     def __init__(
         self,
@@ -62,21 +59,31 @@ class AsyncMilvusClient:
         index_type: str = "HNSW",
         timeout: float | None = None,
         vector_dim: int | None = None,
+        pool_size: int | None = None,
     ):
         self._uri = uri or f"http://{settings.milvus.host}:{settings.milvus.port}"
         self._collection = collection or settings.milvus.collection
         self._index_type = index_type
-        # 0 / None → no wait_for wrapper
         self._timeout = timeout or settings.milvus.timeout_s or None
-        # Размерность берём из OllamaSettings (тот же вектор в pipeline и
-        # в search); коллекция создаётся один раз с этой dim и переживает
-        # последующие запуски, пока её явно не дропнут.
         self._vector_dim = vector_dim or settings.ollama.embedding_dim
+        self._pool = ThreadPoolExecutor(
+            max_workers=pool_size or settings.milvus.pool_size,
+            thread_name_prefix="milvus",
+        )
         self._client: MilvusClient | None = None
 
     async def _run(self, fn, *args, **kwargs):
-        """Run a blocking pymilvus call in a thread with an async timeout."""
-        coro = asyncio.to_thread(fn, *args, **kwargs)
+        """Run blocking pymilvus call in our dedicated thread pool.
+
+        ``asyncio.wait_for`` обеспечивает async-уровневый таймаут, но
+        **не отменяет** сам thread — блокирующий вызов продолжит жить в
+        pool'е до своего естественного завершения. Поэтому pool с
+        фиксированным ``max_workers=pool_size`` — чтобы ошибка не
+        уводила executor в зомби-состояние.
+        """
+        loop = asyncio.get_running_loop()
+        call = lambda: fn(*args, **kwargs)  # noqa: E731
+        coro = loop.run_in_executor(self._pool, call)
         if self._timeout:
             return await asyncio.wait_for(coro, timeout=self._timeout)
         return await coro
@@ -89,6 +96,7 @@ class AsyncMilvusClient:
         if self._client:
             await self._run(self._client.close)
             self._client = None
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
     # ── schema + index ────────────────────────────────────────────────
 
@@ -142,14 +150,12 @@ class AsyncMilvusClient:
             index_params=index_params,
         )
         logger.info(
-            "Created collection '%s' with %s index",
-            self._collection,
-            self._index_type,
+            "Created collection {collection} with {index} index",
+            collection=self._collection, index=self._index_type,
         )
 
     # ── writes ────────────────────────────────────────────────────────
 
-    @_retry_milvus
     async def upsert_batch(self, documents: list[Document]) -> None:
         data = [
             {
@@ -171,7 +177,6 @@ class AsyncMilvusClient:
 
     # ── reads ─────────────────────────────────────────────────────────
 
-    @_retry_milvus
     async def search(
         self,
         query_vector: list[float],

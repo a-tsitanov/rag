@@ -14,7 +14,6 @@ live services.
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -22,13 +21,13 @@ from pathlib import Path
 from typing import Any, Callable, Coroutine
 
 import numpy as np
+from loguru import logger
 
 from src.ingestion.chunker import Chunk, EmbedFn, SemanticChunker
 from src.ingestion.parser import DocumentParser, ParsedDocument
+from src.storage.milvus_client import Document as MilvusRow
 
-logger = logging.getLogger(__name__)
-
-# ── result types ──────────────────────────────────────────────────────
+# ── status / timing / result ──────────────────────────────────────────
 
 
 @dataclass
@@ -41,7 +40,7 @@ class StepTiming:
 class ProcessResult:
     doc_id: str
     path: str
-    status: str  # "completed" | "failed"
+    status: str  # "completed" | "failed" | "skipped"
     chunks: int = 0
     error: str = ""
     timings: list[StepTiming] = field(default_factory=list)
@@ -51,15 +50,43 @@ class ProcessResult:
         return sum(t.elapsed_s for t in self.timings)
 
 
+# ── typed pg-status payload (D7) ──────────────────────────────────────
+
+
+@dataclass
+class PGStatusPayload:
+    """Аргументы записи в ``documents`` таблицу.
+
+    Оформлено dataclass'ом, чтобы контракт между `AsyncDocumentWorker`,
+    DI-провайдером `pg_status_updater` и тестами был явным и
+    типизированным.  Добавление нового поля ломает один signature, а не
+    молча дропается в ``**kwargs``.
+    """
+
+    doc_id: str
+    status: str  # pending | processing | completed | failed
+    path: str = ""
+    department: str = ""
+    doc_type: str = ""
+    error: str = ""
+
+
 # ── type aliases for injectable backends ──────────────────────────────
 
-# embed_fn: list[str] → ndarray  (already defined in chunker)
-# milvus_writer: list[dict] → None
 MilvusWriter = Callable[[list[dict]], Coroutine[Any, Any, None]]
-# lightrag_inserter: str → None
 LightRAGInserter = Callable[[str], Coroutine[Any, Any, None]]
-# pg_status_updater: (doc_id, status, path, department, doc_type) → None
 PGStatusUpdater = Callable[..., Coroutine[Any, Any, None]]
+
+
+# ── helpers ───────────────────────────────────────────────────────────
+
+
+def _doc_type_from_path(path: Path) -> str:
+    """Return file extension without dot ("pdf", "docx", …).
+
+    Пустой suffix (файл без расширения) → ``""`` — колонка допускает.
+    """
+    return path.suffix.lstrip(".").lower()
 
 
 # ── worker ────────────────────────────────────────────────────────────
@@ -97,6 +124,19 @@ class AsyncDocumentWorker:
     def _now() -> float:
         return time.monotonic()
 
+    async def _write_status(self, payload: PGStatusPayload) -> None:
+        """Transport-layer конверсия: dataclass → kwargs для Postgres
+        UPSERT.  Делаем здесь, чтобы наружу торчал только типизированный
+        контракт `PGStatusPayload`."""
+        await self._pg_status(
+            doc_id=payload.doc_id,
+            status=payload.status,
+            path=payload.path,
+            department=payload.department,
+            doc_type=payload.doc_type,
+            error=payload.error,
+        )
+
     # ── public API ────────────────────────────────────────────────────
 
     async def process_document(
@@ -108,16 +148,17 @@ class AsyncDocumentWorker:
     ) -> ProcessResult:
         doc_id = doc_id or str(uuid.uuid4())
         path = Path(path)
+        doc_type = _doc_type_from_path(path)
         timings: list[StepTiming] = []
         chunks: list[Chunk] = []
 
         try:
             # ── 0. mark processing ────────────────────────────────
-            await self._pg_status(
+            await self._write_status(PGStatusPayload(
                 doc_id=doc_id, status="processing",
                 path=str(path), department=department,
-                doc_type="", error="",
-            )
+                doc_type=doc_type,
+            ))
 
             # ── 1. parse ──────────────────────────────────────────
             t0 = self._now()
@@ -129,7 +170,6 @@ class AsyncDocumentWorker:
 
             # caller's department wins; fall back to parser-derived value
             department = department or doc.metadata.get("department", "")
-            doc_type = doc.metadata.get("doc_type", "")
 
             # ── 2. chunk ──────────────────────────────────────────
             t0 = self._now()
@@ -163,15 +203,15 @@ class AsyncDocumentWorker:
             t0 = self._now()
             now_ts = int(time.time())
             milvus_rows = [
-                {
-                    "id": chunk.chunk_id,
-                    "content": chunk.content,
-                    "embedding": embeddings[idx].tolist(),
-                    "doc_id": doc_id,
-                    "department": department,
-                    "created_at": now_ts,
-                    "doc_type": doc_type,
-                }
+                MilvusRow(
+                    id=chunk.chunk_id,
+                    content=chunk.content,
+                    embedding=embeddings[idx].tolist(),
+                    doc_id=doc_id,
+                    department=department,
+                    created_at=now_ts,
+                    doc_type=doc_type,
+                ).__dict__
                 for idx, chunk in enumerate(chunks)
             ]
             await self._milvus_writer(milvus_rows)
@@ -179,26 +219,29 @@ class AsyncDocumentWorker:
 
             # ── 6. PG status update ───────────────────────────────
             t0 = self._now()
-            await self._pg_status(
-                doc_id=doc_id,
-                status="completed",
-                path=str(path),
-                department=department,
+            await self._write_status(PGStatusPayload(
+                doc_id=doc_id, status="completed",
+                path=str(path), department=department,
                 doc_type=doc_type,
-                error="",
-            )
+            ))
             timings.append(StepTiming("pg_status", self._now() - t0))
 
         except Exception as exc:
-            logger.error("Failed to process %s: %s", path, exc, exc_info=True)
+            logger.error(
+                "process_document failed  doc_id={doc_id} path={path}  error={err}",
+                doc_id=doc_id, path=str(path), err=exc,
+            )
             try:
-                await self._pg_status(
+                await self._write_status(PGStatusPayload(
                     doc_id=doc_id, status="failed",
                     path=str(path), department=department,
-                    doc_type="", error=str(exc),
+                    doc_type=doc_type, error=str(exc),
+                ))
+            except Exception as pg_exc:
+                logger.warning(
+                    "could not update PG status  doc_id={doc_id}  pg_error={err}",
+                    doc_id=doc_id, err=pg_exc,
                 )
-            except Exception:
-                logger.warning("Could not update PG status for %s", doc_id)
 
             return ProcessResult(
                 doc_id=doc_id,
@@ -231,8 +274,10 @@ class AsyncDocumentWorker:
         parts = " | ".join(f"{t.name}={t.elapsed_s:.3f}s" for t in timings)
         total = sum(t.elapsed_s for t in timings)
         logger.info(
-            "Processed %s  doc_id=%s  chunks=%d  total=%.3fs  [%s]",
-            path.name, doc_id, len(chunks), total, parts,
+            "processed  file={file} doc_id={doc_id} chunks={chunks} "
+            "total_s={total:.3f} steps=[{parts}]",
+            file=path.name, doc_id=doc_id, chunks=len(chunks),
+            total=total, parts=parts,
         )
 
 

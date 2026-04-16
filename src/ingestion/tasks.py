@@ -22,10 +22,11 @@ Run the worker with::
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
+import psycopg
 from dishka.integrations.taskiq import FromDishka, inject, setup_dishka
+from loguru import logger
 from taskiq import TaskiqEvents
 from taskiq.middlewares import SimpleRetryMiddleware
 from taskiq_aio_pika import AioPikaBroker
@@ -33,8 +34,7 @@ from taskiq_aio_pika import AioPikaBroker
 from src.config import settings
 from src.di import build_worker_container
 from src.ingestion.worker import AsyncDocumentWorker
-
-logger = logging.getLogger(__name__)
+from src.utils.logging import setup_logging
 
 # ── broker ────────────────────────────────────────────────────────────
 
@@ -61,8 +61,12 @@ _container: "object | None" = None
 
 
 @broker.on_event(TaskiqEvents.WORKER_STARTUP)
-async def _wire_dishka(_state) -> None:
+async def _wire_worker(_state) -> None:
     global _container
+    # Настраиваем loguru именно тут: на module-load flag is_worker_process
+    # ещё False — logger уйдёт в stdout вдвоём с taskiq-builtins. В
+    # WORKER_STARTUP CLI уже проинициализировала процесс.
+    setup_logging()
     _container = build_worker_container()
     setup_dishka(container=_container, broker=broker)
     logger.info("dishka worker container wired into taskiq broker")
@@ -80,6 +84,11 @@ async def _close_container(_state) -> None:
 # ── task ──────────────────────────────────────────────────────────────
 
 
+_IDEMPOTENT_STATUS_SELECT = (
+    "SELECT status FROM documents WHERE id = %s::uuid"
+)
+
+
 @broker.task(
     retry_on_error=True,
     # hard-лимит на выполнение — получатель обернёт в anyio.fail_after
@@ -92,25 +101,44 @@ async def process_document(
     department: str,
     priority: str,
     worker: FromDishka[AsyncDocumentWorker],
+    pg: FromDishka[psycopg.AsyncConnection],
 ) -> None:
     """Parse → chunk → embed → LightRAG → Milvus for one document.
 
+    Идемпотентно: если в Postgres уже ``status='completed'`` — skip.
+    Защищает от re-delivery, когда воркер упал после `Milvus.upsert`,
+    но до `ACK` RabbitMQ.
+
     On success the worker writes ``documents.status='completed'`` to
     Postgres.  On failure, taskiq's ``SimpleRetryMiddleware`` retries up
-    to 3 times; after terminal failure the worker writes
-    ``status='failed'`` with the error string and RabbitMQ's DLX picks
-    up the message.
+    to ``TASKIQ_MAX_RETRIES`` times; after terminal failure the worker
+    writes ``status='failed'`` with the error string and RabbitMQ's DLX
+    picks up the message.
     """
-    logger.info(
-        "process_document start doc_id=%s path=%s dept=%s priority=%s",
-        doc_id, path, department, priority,
-    )
-    result = await worker.process_document(
-        Path(path), doc_id=doc_id, department=department,
-    )
-    if result.status == "failed":
-        # re-raise so the retry middleware + DLX kick in
-        raise RuntimeError(result.error or "processing failed")
+    # Привязываем job_id к контексту — все логи из worker.process_document,
+    # Milvus-клиента, LightRAG и т.д. получают это поле "бесплатно".
+    with logger.contextualize(job_id=doc_id):
+        # ── idempotency check ────────────────────────────────────
+        try:
+            cur = await pg.execute(_IDEMPOTENT_STATUS_SELECT, (doc_id,))
+            row = await cur.fetchone()
+            if row and row[0] == "completed":
+                logger.info("skip  reason=already_completed")
+                return
+        except Exception as exc:
+            # PG недоступен — не блокируем процессинг, просто логируем
+            logger.warning("idempotency check failed  error={err}", err=exc)
+
+        logger.info(
+            "process_document start  path={path} dept={dept} priority={priority}",
+            path=path, dept=department, priority=priority,
+        )
+        result = await worker.process_document(
+            Path(path), doc_id=doc_id, department=department,
+        )
+        if result.status == "failed":
+            # re-raise so the retry middleware + DLX kick in
+            raise RuntimeError(result.error or "processing failed")
 
 
 # ── priority mapping ──────────────────────────────────────────────────

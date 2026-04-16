@@ -1,26 +1,31 @@
 """POST /api/v1/ingest — upload document and enqueue for processing.
 GET  /api/v1/ingest/{job_id} — query job status from Postgres."""
 
-import logging
 import uuid
 from pathlib import Path
 from typing import Literal
 
+import aiofiles
 import psycopg
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from src.api.auth import require_api_key
+from src.config import settings
 from src.ingestion.tasks import priority_value, process_document
 from src.ingestion.worker import PGStatusUpdater
 
-logger = logging.getLogger(__name__)
+router = APIRouter(tags=["ingestion"])
 
-UPLOAD_DIR = Path("/tmp/enterprise-kb-uploads")
+# Директория приземления аплоадов — shared volume между api и worker
+# (см. docker-compose: app_data:/app/data монтируется в оба).
+UPLOAD_DIR = Path(settings.api.upload_dir)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-router = APIRouter(tags=["ingestion"])
+# 1 MB — компромисс между оверхедом на await и кучей syscall'ов
+_UPLOAD_CHUNK_SIZE = 1 << 20
 
 
 # ── schemas ───────────────────────────────────────────────────────────
@@ -50,11 +55,9 @@ class JobProgressResponse(BaseModel):
     status_code=status.HTTP_202_ACCEPTED,
     summary="Upload a document and enqueue it for ingestion",
     description=(
-        "Saves the uploaded file to server-side storage, inserts a "
-        "``documents`` row with ``status='pending'``, and kicks a "
-        "``process_document`` task onto RabbitMQ.  A taskiq worker will "
-        "pick it up asynchronously.  Poll ``GET /ingest/{job_id}`` for "
-        "progress."
+        "Stream-сохраняет upload на диск (shared volume), инсертит "
+        "``documents`` pending-row, кидает ``process_document`` в RabbitMQ. "
+        "Worker подхватит асинхронно. Статус — ``GET /ingest/{job_id}``."
     ),
     responses={
         401: {"description": "Missing X-API-Key"},
@@ -70,15 +73,20 @@ async def ingest(
         "normal", description="Scheduling hint for the worker pool",
     ),
 ) -> IngestEnqueuedResponse:
-    # persist upload
     safe_name = (file.filename or "upload.bin").replace("/", "_")
     doc_id = str(uuid.uuid4())
     dest = UPLOAD_DIR / f"{doc_id}_{safe_name}"
-    dest.write_bytes(await file.read())
+
+    # ── stream upload без полной буферизации в памяти ────────────────
+    total = 0
+    async with aiofiles.open(dest, "wb") as f:
+        while chunk := await file.read(_UPLOAD_CHUNK_SIZE):
+            total += len(chunk)
+            await f.write(chunk)
     await file.close()
 
-    # insert pending row so GET /ingest/{id} has something to read
-    # even before the worker wakes up
+    # pending row так, чтобы GET /ingest/{id} имел что читать до того,
+    # как воркер подхватит задачу
     await pg_status(
         doc_id=doc_id,
         status="pending",
@@ -100,11 +108,13 @@ async def ingest(
     )
 
     logger.info(
-        "ingest enqueued",
-        extra={
-            "job_id": doc_id, "path": str(dest),
-            "department": department, "priority": priority,
-        },
+        "ingest enqueued  job_id={job_id} path={path} dept={dept} "
+        "priority={priority} size_bytes={size}",
+        job_id=doc_id,
+        path=str(dest),
+        dept=department,
+        priority=priority,
+        size=total,
     )
     return IngestEnqueuedResponse(job_id=doc_id, status="queued", path=str(dest))
 

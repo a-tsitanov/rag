@@ -13,22 +13,21 @@ can kick tasks without running any task body itself.
 
 from __future__ import annotations
 
-import logging
 from contextlib import asynccontextmanager
 
+from dishka.integrations.fastapi import setup_dishka
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
 
-from dishka.integrations.fastapi import setup_dishka
-
-from src.api.middleware import RequestLoggingMiddleware, configure_logging
+from src.api.middleware import RequestLoggingMiddleware
 from src.api.routes import health, ingest, search
 from src.config import settings
 from src.di import build_api_container
 from src.ingestion.tasks import broker
+from src.utils.logging import setup_logging
 
-configure_logging()
-logger = logging.getLogger(__name__)
+setup_logging()
 
 
 @asynccontextmanager
@@ -37,7 +36,7 @@ async def lifespan(app: FastAPI):
     # startup dance if we happen to be imported from `taskiq worker`.
     if not broker.is_worker_process:
         await broker.startup()
-        logger.info("taskiq broker connected: %s", settings.rabbitmq.url)
+        logger.info("taskiq broker connected  url={url}", url=settings.rabbitmq.url)
     try:
         yield
     finally:

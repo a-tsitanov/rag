@@ -1,32 +1,13 @@
-import logging
 from dataclasses import dataclass, field
 
+from loguru import logger
 from neo4j import AsyncGraphDatabase
-from neo4j.exceptions import (
-    ClientError,
-    DatabaseError,
-    ServiceUnavailable,
-    SessionExpired,
-)
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
+from neo4j.exceptions import ClientError, DatabaseError
 
 from src.config import settings
 
-logger = logging.getLogger(__name__)
-
-_retry_neo4j = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type((ServiceUnavailable, SessionExpired, ConnectionError)),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
+# Retry не делаем на уровне клиента — делает taskiq на уровне всей
+# ingestion-задачи. Это уберёт двойной ретрай (3× tenacity × 2× taskiq).
 
 
 @dataclass
@@ -103,7 +84,6 @@ class AsyncNeo4jClient:
 
     # ── writes ────────────────────────────────────────────────────────
 
-    @_retry_neo4j
     async def upsert_entity(
         self,
         name: str,
@@ -124,7 +104,6 @@ class AsyncNeo4jClient:
                 props=props,
             )
 
-    @_retry_neo4j
     async def upsert_relation(
         self,
         from_entity: str,
@@ -148,7 +127,6 @@ class AsyncNeo4jClient:
 
     # ── reads ─────────────────────────────────────────────────────────
 
-    @_retry_neo4j
     async def get_neighbors(
         self,
         entity_name: str,
