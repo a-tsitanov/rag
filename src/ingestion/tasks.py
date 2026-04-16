@@ -40,10 +40,10 @@ logger = logging.getLogger(__name__)
 
 broker = AioPikaBroker(
     settings.rabbitmq.url,
-    qos=10,
+    qos=settings.taskiq.prefetch,
     max_priority=10,
 ).with_middlewares(
-    SimpleRetryMiddleware(default_retry_count=3),
+    SimpleRetryMiddleware(default_retry_count=settings.taskiq.max_retries),
 )
 
 
@@ -80,7 +80,11 @@ async def _close_container(_state) -> None:
 # ── task ──────────────────────────────────────────────────────────────
 
 
-@broker.task(retry_on_error=True)
+@broker.task(
+    retry_on_error=True,
+    # hard-лимит на выполнение — получатель обернёт в anyio.fail_after
+    timeout=settings.taskiq.task_timeout_s,
+)
 @inject(patch_module=True)
 async def process_document(
     doc_id: str,

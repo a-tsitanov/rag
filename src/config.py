@@ -92,7 +92,10 @@ class OllamaSettings(BaseSettings):
     model: str = "llama3.1:8b"
     embedding_model: str = "nomic-embed-text"
     embedding_dim: int = 1024
-    timeout_s: float = 60.0
+    # HTTP-level timeout на каждый запрос в Ollama.  Должен быть **не
+    # меньше** ``LIGHTRAG_LLM_TIMEOUT_S`` — иначе httpx оборвёт соединение
+    # до того, как LightRAG сам решит таймаутить.
+    timeout_s: float = 600.0
 
 
 class OpenAISettings(BaseSettings):
@@ -107,6 +110,25 @@ class RabbitMQSettings(BaseSettings):
 
     url: str = "amqp://guest:guest@localhost:5672/"
     timeout_s: float = 10.0
+
+
+class TaskiqSettings(BaseSettings):
+    """Настройки для taskiq задач/воркера."""
+
+    model_config = _sub("TASKIQ_")
+
+    # Per-task timeout (секунды).  Стэмпается как label ``timeout`` на
+    # ``process_document``; получатель оборачивает выполнение в
+    # ``anyio.fail_after``.  Должен быть ≥ суммы LightRAG-таймаутов с
+    # запасом (LLM + embed + Milvus + PG).
+    task_timeout_s: int = 1800  # 30 мин
+    # Сколько раз SimpleRetryMiddleware повторит упавшую задачу.
+    # Учитывая длинные таймауты, 3 ретрая × 30 мин = 1.5 часа — много.
+    max_retries: int = 2
+    # Prefetch per-worker (QoS в aio-pika).  Сколько сообщений забирать
+    # авансом.  Для медленных задач — низкое значение, чтобы не блокировать
+    # другие воркеры.
+    prefetch: int = 2
 
 
 class LightRAGSettings(BaseSettings):
@@ -125,6 +147,16 @@ class LightRAGSettings(BaseSettings):
     embedding_model: str = ""
     embedding_dim: int = 0
     max_token_size: int = 8192
+    # Per-вызов таймауты, прокидываются в LightRAG.__init__.  Дефолты
+    # подняты относительно LightRAG-дефолтов (LLM 180s, embed 30s) —
+    # у медленных локальных моделей генерация 7B/9B на CPU легко
+    # превышает несколько минут на один запрос.
+    llm_timeout_s: int = 600
+    embedding_timeout_s: int = 120
+    # Concurrency cap для LLM-вызовов.  LightRAG-дефолт=4; для слабых
+    # локальных машин ставь 1-2, иначе параллельные запросы забивают
+    # очередь в Ollama.
+    max_async: int = 2
 
 
 class IngestionSettings(BaseSettings):
@@ -150,6 +182,7 @@ class Settings(BaseSettings):
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     rabbitmq: RabbitMQSettings = Field(default_factory=RabbitMQSettings)
+    taskiq: TaskiqSettings = Field(default_factory=TaskiqSettings)
     lightrag: LightRAGSettings = Field(default_factory=LightRAGSettings)
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
 

@@ -101,6 +101,13 @@ async def create_rag(
         llm_model_name=llm_name,
         embedding_func=embedding_func,
         graph_storage=graph_kind,
+        # Длительные таймауты — Ollama на CPU часто думает минутами.
+        default_llm_timeout=settings.lightrag.llm_timeout_s,
+        default_embedding_timeout=settings.lightrag.embedding_timeout_s,
+        llm_model_max_async=settings.lightrag.max_async,
+        # Пробрасываем host в ollama_model_complete / ollama_embed, чтобы
+        # они обращались не к localhost контейнера, а к нашему Ollama.
+        llm_model_kwargs={"host": settings.ollama.host},
     )
 
     # LightRAG 1.4+ requires explicit storage initialization before any
@@ -109,9 +116,12 @@ async def create_rag(
     await rag.initialize_storages()
 
     logger.info(
-        "LightRAG created  working_dir=%s  llm=%s  embed=%s  dim=%d  "
-        "max_tokens=%d  graph=%s",
-        wd, llm_name, embed_name, embed_dim, max_tok, graph_kind,
+        "LightRAG created  working_dir=%s  llm=%s (timeout=%ds, max_async=%d)  "
+        "embed=%s (dim=%d, timeout=%ds)  max_tokens=%d  graph=%s",
+        wd, llm_name,
+        settings.lightrag.llm_timeout_s, settings.lightrag.max_async,
+        embed_name, embed_dim, settings.lightrag.embedding_timeout_s,
+        max_tok, graph_kind,
     )
     return rag
 

@@ -4,14 +4,15 @@ import uuid
 import pytest
 import pytest_asyncio
 
+from src.config import settings
 from src.storage.milvus_client import (
-    VECTOR_DIM,
     AsyncMilvusClient,
     Document,
     SearchResult,
 )
 
 DEPARTMENTS = ["engineering", "marketing", "sales", "hr"]
+VECTOR_DIM = settings.ollama.embedding_dim
 
 
 def _random_unit_vector(dim: int = VECTOR_DIM) -> list[float]:

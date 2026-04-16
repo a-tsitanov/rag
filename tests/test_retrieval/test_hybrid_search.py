@@ -30,7 +30,10 @@ def _unit(vec: np.ndarray) -> np.ndarray:
     return vec / (np.linalg.norm(vec) + 1e-10)
 
 
-def _topic_vector(topic: str, dim: int = 1024) -> np.ndarray:
+from src.config import settings as _settings
+
+
+def _topic_vector(topic: str, dim: int = _settings.ollama.embedding_dim) -> np.ndarray:
     """Same topic string → same vector (so similarity actually works)."""
     rng = np.random.RandomState(hash(topic) & 0xFFFF_FFFF)
     return _unit(rng.randn(dim).astype(np.float32))
