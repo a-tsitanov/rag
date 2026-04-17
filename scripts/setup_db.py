@@ -260,6 +260,7 @@ _PG_TABLES = [
             status        VARCHAR(32)  NOT NULL DEFAULT 'pending',
             department    VARCHAR(64),
             error         TEXT,
+            summary       TEXT,
             created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
             processed_at  TIMESTAMPTZ
         )
@@ -283,6 +284,10 @@ _PG_MIGRATIONS = [
     (
         "documents.error column",
         "ALTER TABLE documents ADD COLUMN IF NOT EXISTS error TEXT",
+    ),
+    (
+        "documents.summary column",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS summary TEXT",
     ),
 ]
 

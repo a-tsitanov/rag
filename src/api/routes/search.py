@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import logging
-
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Depends, HTTPException, status
+from loguru import logger
 
 from src.api.auth import require_api_key
 from src.models.search import SearchRequest, SearchResponse
 from src.retrieval.hybrid_search import HybridSearcher
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["search"])
 
@@ -24,17 +21,16 @@ router = APIRouter(tags=["search"])
     description=(
         "Runs a hybrid retrieval pipeline:\n\n"
         "1. Embeds the query and fetches candidates from Milvus "
-        "(optionally filtered by ``department``).\n"
-        "2. Reranks candidates with BGE-reranker-v2-m3.\n"
-        "3. Calls LightRAG to generate a natural-language answer in the "
-        "requested ``mode``.\n\n"
-        "Returns the generated ``answer``, reranked ``sources`` with "
-        "``doc_id`` / ``position``, and total ``latency_ms``."
+        "(with metadata filters: department, doc_type, date range).\n"
+        "2. Reranks candidates.\n"
+        "3. Calls LightRAG to generate a natural-language answer with "
+        "configurable QueryParam knobs.\n\n"
+        "Returns ``answer``, ``sources``, and ``latency_ms``."
     ),
     responses={
         401: {"description": "Missing X-API-Key"},
         403: {"description": "Invalid X-API-Key"},
-        500: {"description": "Downstream (Ollama / RAG) failure"},
+        500: {"description": "Downstream failure"},
     },
 )
 @inject
@@ -49,6 +45,17 @@ async def search(
             department=req.department,
             top_k=req.top_k,
             user_id=req.user_id,
+            # Phase 1a: metadata filters
+            doc_type_filter=req.doc_type_filter,
+            created_after=req.created_after,
+            created_before=req.created_before,
+            # Phase 1b: LightRAG QueryParam knobs
+            chunk_top_k=req.chunk_top_k,
+            max_entity_tokens=req.max_entity_tokens,
+            max_relation_tokens=req.max_relation_tokens,
+            max_total_tokens=req.max_total_tokens,
+            response_type=req.response_type,
+            include_references=req.include_references,
         )
     except HTTPException:
         raise

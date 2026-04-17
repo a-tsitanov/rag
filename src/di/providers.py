@@ -36,13 +36,14 @@ logger = logging.getLogger(__name__)
 # ── Postgres: documents table upsert ──────────────────────────────────
 
 _UPSERT_DOC = """
-    INSERT INTO documents (id, path, status, department, error, processed_at)
+    INSERT INTO documents (id, path, status, department, error, summary, processed_at)
     VALUES (
         %(doc_id)s::uuid,
         %(path)s,
         %(status)s::text,
         %(department)s,
         %(error)s,
+        %(summary)s,
         CASE WHEN %(status)s::text IN ('completed', 'failed')
              THEN now() END
     )
@@ -51,6 +52,7 @@ _UPSERT_DOC = """
         status       = EXCLUDED.status,
         department   = EXCLUDED.department,
         error        = EXCLUDED.error,
+        summary      = COALESCE(EXCLUDED.summary, documents.summary),
         processed_at = EXCLUDED.processed_at
 """
 
@@ -146,6 +148,7 @@ class CommonProvider(Provider):
                 "status": kwargs["status"],
                 "department": kwargs.get("department", "") or None,
                 "error": kwargs.get("error", "") or None,
+                "summary": kwargs.get("summary") or None,
             }
             await pg.execute(_UPSERT_DOC, payload)
         return _update
@@ -224,12 +227,14 @@ class WorkerProvider(Provider):
         inserter: LightRAGInserter,
         status: PGStatusUpdater,
         chunker: SemanticChunker,
+        oc: ollama.AsyncClient,
     ) -> AsyncDocumentWorker:
         return AsyncDocumentWorker(
             vectorstore=vs,
             lightrag_inserter=inserter,
             pg_status_updater=status,
             chunker=chunker,
+            ollama_client=oc,
         )
 
 

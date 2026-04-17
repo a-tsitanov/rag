@@ -176,11 +176,17 @@ class IngestionSettings(BaseSettings):
     batch_size: int = 10
     chunk_size: int = 512
     chunk_overlap: int = 50
-    # langchain-experimental SemanticChunker breakpoint strategy:
-    # percentile | standard_deviation | interquartile | gradient
+    # langchain-experimental SemanticChunker breakpoint strategy
     breakpoint_type: str = "percentile"
-    # None (= default для выбранного типа) или конкретное число
     breakpoint_amount: float | None = None
+    # Document summary — LLM генерирует 2-3 предложения при ingestion.
+    # Хранится в documents.summary (PG). Используется для hierarchical
+    # two-stage search (Phase 2a).
+    summary_enabled: bool = True
+    summary_prompt: str = (
+        "Summarize the following document in 2-3 sentences. "
+        "Focus on the key topics and facts. Reply with just the summary."
+    )
 
 
 # ── root ─────────────────────────────────────────────────────────────

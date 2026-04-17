@@ -20,9 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
+import ollama
 from langchain_core.documents import Document as LCDocument
 from loguru import logger
 
+from src.config import settings
 from src.ingestion.chunker import Chunk, SemanticChunker
 from src.ingestion.parser import DocumentParser, ParsedDocument
 
@@ -57,6 +59,7 @@ class PGStatusPayload:
     department: str = ""
     doc_type: str = ""
     error: str = ""
+    summary: str = ""
 
 
 # ── type aliases ──────────────────────────────────────────────────────
@@ -88,6 +91,7 @@ class AsyncDocumentWorker:
         vectorstore: VectorStoreProto,
         lightrag_inserter: LightRAGInserter,
         pg_status_updater: PGStatusUpdater,
+        ollama_client: ollama.AsyncClient | None = None,
         parser: DocumentParser | None = None,
         chunker: SemanticChunker | None = None,
     ):
@@ -96,6 +100,7 @@ class AsyncDocumentWorker:
         self._vectorstore = vectorstore
         self._lightrag_insert = lightrag_inserter
         self._pg_status = pg_status_updater
+        self._ollama = ollama_client
 
     @staticmethod
     def _now() -> float:
@@ -109,6 +114,7 @@ class AsyncDocumentWorker:
             department=payload.department,
             doc_type=payload.doc_type,
             error=payload.error,
+            summary=payload.summary,
         )
 
     async def process_document(
@@ -140,6 +146,26 @@ class AsyncDocumentWorker:
                 raise ValueError(f"parser returned empty text for {path}")
 
             department = department or doc.metadata.get("department", "")
+
+            # 1b. summarize (if enabled + ollama client available)
+            summary = ""
+            if settings.ingestion.summary_enabled and self._ollama and doc.text:
+                t1 = self._now()
+                try:
+                    resp = await self._ollama.chat(
+                        model=settings.ollama.model,
+                        messages=[
+                            {"role": "system", "content": settings.ingestion.summary_prompt},
+                            {"role": "user", "content": doc.text[:8000]},
+                        ],
+                    )
+                    summary = resp["message"]["content"].strip()
+                    timings.append(StepTiming("summary", self._now() - t1))
+                except Exception as exc:
+                    logger.warning(
+                        "summary generation failed  doc_id={doc_id} err={err}",
+                        doc_id=doc_id, err=exc,
+                    )
 
             # 2. chunk (langchain SemanticChunker)
             t0 = self._now()
@@ -179,12 +205,14 @@ class AsyncDocumentWorker:
             await self._lightrag_insert(doc.text)
             timings.append(StepTiming("lightrag", self._now() - t0))
 
-            # 5. PG status → completed
+            # 5. PG status → completed (+ summary if generated)
             t0 = self._now()
-            await self._write_status(PGStatusPayload(
+            payload = PGStatusPayload(
                 doc_id=doc_id, status="completed",
                 path=str(path), department=department, doc_type=doc_type,
-            ))
+            )
+            payload.summary = summary
+            await self._write_status(payload)
             timings.append(StepTiming("pg_status", self._now() - t0))
 
         except Exception as exc:
