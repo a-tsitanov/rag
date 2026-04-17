@@ -176,6 +176,11 @@ class IngestionSettings(BaseSettings):
     batch_size: int = 10
     chunk_size: int = 512
     chunk_overlap: int = 50
+    # langchain-experimental SemanticChunker breakpoint strategy:
+    # percentile | standard_deviation | interquartile | gradient
+    breakpoint_type: str = "percentile"
+    # None (= default для выбранного типа) или конкретное число
+    breakpoint_amount: float | None = None
 
 
 # ── root ─────────────────────────────────────────────────────────────

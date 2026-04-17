@@ -13,21 +13,7 @@
 #   loguru    — единая система логирования (заменил structlog)
 #   aiofiles  — streaming upload в POST /ingest
 #
-aio-pika==9.6.2
-aioboto3==15.5.0
-aiobotocore==2.25.1
-aiofiles==25.1.0
-aiohappyeyeballs==2.6.1
-aiohttp==3.13.5
-aioitertools==0.13.0
-aiormq==6.8.1
-aiosignal==1.4.0
-aiostream==0.7.1
-annotated-doc==0.0.4
-annotated-types==0.7.0
-anyio==4.13.0
-ascii_colors==0.11.21
-attrs==26.1.0
+
 beautifulsoup4==4.12.3
 boto3==1.40.61
 botocore==1.40.61
@@ -39,6 +25,7 @@ charset-normalizer==3.4.7
 click==8.3.2
 configparser==7.2.0
 cryptography==46.0.7
+dataclasses-json==0.6.7
 dishka==1.9.1
 distro==1.9.0
 docker==7.1.0
@@ -56,6 +43,7 @@ h11==0.16.0
 hf-xet==1.4.3
 httpcore==1.0.9
 httptools==0.7.1
+httpx-sse==0.4.3
 httpx==0.28.1
 huggingface_hub==1.10.1
 idna==3.11
@@ -69,18 +57,23 @@ joblib==1.5.3
 json_repair==0.59.3
 jsonpatch==1.33
 jsonpointer==3.1.1
-langchain-core==0.3.84
-langchain-text-splitters==0.3.4
+langchain-classic==1.0.4
+langchain-community==0.4.1
+langchain-core==1.2.31
+langchain-experimental==0.4.1
+langchain-text-splitters==1.1.2
 langsmith==0.7.31
 lightrag-hku==1.4.14
 loguru==0.7.3
 lxml==6.0.4
 markdown-it-py==4.0.0
 MarkupSafe==3.0.3
+marshmallow==3.26.2
 mdurl==0.1.2
 milvus-lite==2.5.1
 mpmath==1.3.0
 multidict==6.7.1
+mypy_extensions==1.1.0
 nano-vectordb==0.0.4.3
 neo4j==6.1.0
 networkx==3.6.1
@@ -135,6 +128,7 @@ shellingham==1.5.4
 six==1.17.0
 sniffio==1.3.1
 soupsieve==2.8.3
+SQLAlchemy==2.0.49
 starlette==1.0.0
 sympy==1.14.0
 taskiq-aio-pika==0.6.0
@@ -149,6 +143,7 @@ tqdm==4.67.3
 transformers==5.5.4
 typer==0.24.1
 typing_extensions==4.15.0
+typing-inspect==0.9.0
 typing-inspection==0.4.2
 tzdata==2026.1
 ujson==5.12.0
