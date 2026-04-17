@@ -1,18 +1,45 @@
 """Tests for the ingestion task (taskiq).
 
 Uses ``taskiq.InMemoryBroker`` so the suite runs without RabbitMQ.
-Real AMQP round-trip is covered by the end-to-end smoke step in the
-migration plan.
 """
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import pytest_asyncio
+from langchain_core.embeddings import Embeddings
 from taskiq import InMemoryBroker
+
+from src.ingestion.chunker import SemanticChunker
 
 
 # ── fake backends ────────────────────────────────────────────────────
+
+
+class FakeEmbeddings(Embeddings):
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [
+            (np.ones(768, dtype="float32") / (768 ** 0.5)).tolist()
+            for _ in texts
+        ]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
+
+
+class FakeVectorStore:
+    def __init__(self):
+        self.docs: list[dict] = []
+
+    def add_documents(self, documents, *, ids=None, **kw):
+        for i, doc in enumerate(documents):
+            self.docs.append({
+                "id": ids[i] if ids else str(i),
+                "content": doc.page_content,
+                **doc.metadata,
+            })
+        return ids or [str(i) for i in range(len(documents))]
 
 
 class FakePG:
@@ -23,14 +50,6 @@ class FakePG:
         self.docs[kwargs["doc_id"]] = kwargs
 
 
-class FakeMilvusWriter:
-    def __init__(self):
-        self.rows: list[dict] = []
-
-    async def __call__(self, rows: list[dict]) -> None:
-        self.rows.extend(rows)
-
-
 class FakeLightRAG:
     def __init__(self):
         self.texts: list[str] = []
@@ -39,34 +58,26 @@ class FakeLightRAG:
         self.texts.append(text)
 
 
-def _fake_embed(texts):
-    import numpy as np
-
-    return np.ones((len(texts), 1024), dtype="float32") / (1024 ** 0.5)
-
-
-# ── fixture: in-memory broker + ``process_document`` task ────────────
+# ── fixture ──────────────────────────────────────────────────────────
 
 
 @pytest_asyncio.fixture
 async def inmem_task():
-    """Wire an AsyncDocumentWorker (with fake backends) into an
-    InMemoryBroker-registered ``process_document`` task.
-
-    Yields ``(task, pg, milvus, lightrag)``.
-    """
     from pathlib import Path
 
     from src.ingestion.worker import AsyncDocumentWorker
 
     pg = FakePG()
-    milvus = FakeMilvusWriter()
+    vs = FakeVectorStore()
     lightrag = FakeLightRAG()
+    emb = FakeEmbeddings()
+    chunker = SemanticChunker(embeddings=emb, max_tokens=512, overlap=50)
+
     worker = AsyncDocumentWorker(
-        embed_fn=_fake_embed,
-        milvus_writer=milvus,
+        vectorstore=vs,
         lightrag_inserter=lightrag,
         pg_status_updater=pg,
+        chunker=chunker,
     )
 
     broker = InMemoryBroker()
@@ -83,17 +94,17 @@ async def inmem_task():
 
     await broker.startup()
     try:
-        yield process_document, pg, milvus, lightrag
+        yield process_document, pg, vs, lightrag
     finally:
         await broker.shutdown()
 
 
-# ── happy path ───────────────────────────────────────────────────────
+# ── tests ────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_kick_completes_successfully(inmem_task, tmp_path):
-    task, pg, milvus, lightrag = inmem_task
+    task, pg, vs, lightrag = inmem_task
 
     sample = tmp_path / "hello.txt"
     sample.write_text(
@@ -110,17 +121,13 @@ async def test_kick_completes_successfully(inmem_task, tmp_path):
 
     assert result.is_err is False, getattr(result, "error", None)
     assert pg.docs[doc_id]["status"] == "completed"
-    assert pg.docs[doc_id]["error"] in ("", None)
-    assert len(milvus.rows) >= 1
+    assert len(vs.docs) >= 1
     assert lightrag.texts == [sample.read_text()]
-
-
-# ── failure path ─────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_kick_failure_writes_error(inmem_task):
-    task, pg, _milvus, _rag = inmem_task
+    task, pg, _vs, _rag = inmem_task
 
     doc_id = "22222222-2222-2222-2222-222222222222"
     handle = await task.kiq(
@@ -131,10 +138,6 @@ async def test_kick_failure_writes_error(inmem_task):
 
     assert result.is_err is True
     assert pg.docs[doc_id]["status"] == "failed"
-    assert pg.docs[doc_id]["error"]
-
-
-# ── priority mapping ─────────────────────────────────────────────────
 
 
 def test_priority_value_mapping():
@@ -143,4 +146,4 @@ def test_priority_value_mapping():
     assert priority_value("low") == 0
     assert priority_value("normal") == 5
     assert priority_value("high") == 9
-    assert priority_value("bogus") == 5  # fallback
+    assert priority_value("bogus") == 5

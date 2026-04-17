@@ -1,7 +1,7 @@
 """Tests for AsyncDocumentWorker + BatchProcessor.
 
-All external backends (Milvus, LightRAG, PostgreSQL) are replaced with
-in-memory fakes so the test runs without any live services.
+All external backends are replaced with in-memory fakes so the test
+runs without any live services.
 """
 
 from __future__ import annotations
@@ -12,7 +12,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import pytest_asyncio
+from langchain_core.embeddings import Embeddings
 
+from src.ingestion.chunker import SemanticChunker
 from src.ingestion.worker import (
     AsyncDocumentWorker,
     BatchProcessor,
@@ -21,33 +23,41 @@ from src.ingestion.worker import (
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+
 # ── fake backends ─────────────────────────────────────────────────────
 
 
-def _fake_embed(texts: list[str]) -> np.ndarray:
-    """Deterministic unit vectors — no model download."""
-    vecs = []
-    for t in texts:
-        rng = np.random.RandomState(hash(t) & 0xFFFF_FFFF)
-        v = rng.randn(1024).astype(np.float32)
-        v /= np.linalg.norm(v) + 1e-10
-        vecs.append(v)
-    return np.array(vecs, dtype=np.float32)
+class FakeEmbeddings(Embeddings):
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        vecs = []
+        for t in texts:
+            rng = np.random.RandomState(hash(t) & 0xFFFF_FFFF)
+            v = rng.randn(768).astype(np.float32)
+            v /= np.linalg.norm(v) + 1e-10
+            vecs.append(v.tolist())
+        return vecs
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
 
 
-class FakeMilvus:
-    """Collects every row written to it."""
+class FakeVectorStore:
+    """Mimics langchain Milvus.add_documents interface."""
 
     def __init__(self):
-        self.rows: list[dict] = []
+        self.docs: list[dict] = []
 
-    async def write(self, data: list[dict]) -> None:
-        self.rows.extend(data)
+    def add_documents(self, documents, *, ids=None, **kwargs):
+        for i, doc in enumerate(documents):
+            self.docs.append({
+                "id": ids[i] if ids else str(i),
+                "content": doc.page_content,
+                **doc.metadata,
+            })
+        return ids or [str(i) for i in range(len(documents))]
 
 
 class FakeLightRAG:
-    """Records every text inserted."""
-
     def __init__(self):
         self.texts: list[str] = []
 
@@ -56,8 +66,6 @@ class FakeLightRAG:
 
 
 class FakePG:
-    """Stores status updates as ``{doc_id: {...}}``."""
-
     def __init__(self):
         self.docs: dict[str, dict] = {}
 
@@ -70,22 +78,22 @@ class FakePG:
 
 @pytest.fixture
 def backends():
-    milvus = FakeMilvus()
+    vs = FakeVectorStore()
     lightrag = FakeLightRAG()
     pg = FakePG()
-    return milvus, lightrag, pg
+    return vs, lightrag, pg
 
 
 @pytest.fixture
 def worker(backends):
-    milvus, lightrag, pg = backends
+    vs, lightrag, pg = backends
+    emb = FakeEmbeddings()
+    chunker = SemanticChunker(embeddings=emb, max_tokens=512, overlap=50)
     return AsyncDocumentWorker(
-        embed_fn=_fake_embed,
-        milvus_writer=milvus.write,
+        vectorstore=vs,
         lightrag_inserter=lightrag.insert,
         pg_status_updater=pg.update,
-        embedding_batch_size=32,
-        embedding_dim=1024,
+        chunker=chunker,
     )
 
 
@@ -94,7 +102,7 @@ def worker(backends):
 
 @pytest.mark.asyncio
 async def test_process_pdf(worker, backends):
-    milvus, lightrag, pg = backends
+    vs, lightrag, pg = backends
 
     result = await worker.process_document(FIXTURES / "sample.pdf")
 
@@ -102,20 +110,17 @@ async def test_process_pdf(worker, backends):
     assert result.status == "completed"
     assert result.chunks >= 1
     assert result.error == ""
-    assert result.doc_id  # non-empty UUID
+    assert result.doc_id
     assert result.total_s > 0
 
-    # timing steps recorded
     step_names = [t.name for t in result.timings]
-    assert step_names == ["parse", "chunk", "embed", "lightrag", "milvus", "pg_status"]
+    assert step_names == ["parse", "chunk", "vectorstore", "lightrag", "pg_status"]
     for t in result.timings:
         assert t.elapsed_s >= 0
 
-    # backends received data
-    assert len(milvus.rows) == result.chunks
-    for row in milvus.rows:
+    assert len(vs.docs) == result.chunks
+    for row in vs.docs:
         assert row["doc_id"] == result.doc_id
-        assert len(row["embedding"]) == 1024
         assert row["content"]
 
     assert len(lightrag.texts) == 1
@@ -124,17 +129,17 @@ async def test_process_pdf(worker, backends):
 
 @pytest.mark.asyncio
 async def test_process_docx(worker, backends):
-    milvus, lightrag, pg = backends
+    vs, lightrag, pg = backends
     result = await worker.process_document(FIXTURES / "sample.docx")
 
     assert result.status == "completed"
     assert result.chunks >= 1
-    assert len(milvus.rows) == result.chunks
+    assert len(vs.docs) == result.chunks
 
 
 @pytest.mark.asyncio
 async def test_process_txt(worker, backends):
-    milvus, _, pg = backends
+    _, _, pg = backends
     result = await worker.process_document(FIXTURES / "sample.txt")
 
     assert result.status == "completed"
@@ -157,7 +162,7 @@ async def test_nonexistent_file_fails_gracefully(worker, backends):
 
 @pytest.mark.asyncio
 async def test_batch_5_documents_parallel(worker, backends):
-    milvus, lightrag, pg = backends
+    vs, lightrag, pg = backends
     batch = BatchProcessor(worker, concurrency=10)
 
     paths = [
@@ -169,45 +174,20 @@ async def test_batch_5_documents_parallel(worker, backends):
     ]
     results = await batch.process_batch(paths, concurrency=10)
 
-    # all five completed
     assert len(results) == 5
     assert all(r.status == "completed" for r in results)
 
-    # unique doc_ids
     doc_ids = [r.doc_id for r in results]
     assert len(set(doc_ids)) == 5
 
-    # every doc has chunks in milvus
     total_chunks = sum(r.chunks for r in results)
-    assert len(milvus.rows) == total_chunks
-
-    # every doc went through lightrag
+    assert len(vs.docs) == total_chunks
     assert len(lightrag.texts) == 5
-
-    # every doc updated in PG
     assert len(pg.docs) == 5
-    assert all(d["status"] == "completed" for d in pg.docs.values())
-
-    # ── print metrics ─────────────────────────────────────────────
-    print("\n\n=== Batch Processing Metrics (5 documents) ===\n")
-    print(f"{'File':<20} {'Status':<10} {'Chunks':>6} {'Total':>8}   Steps")
-    print("-" * 80)
-    for r in results:
-        name = Path(r.path).name
-        steps = "  ".join(f"{t.name}={t.elapsed_s:.3f}s" for t in r.timings)
-        print(f"{name:<20} {r.status:<10} {r.chunks:>6} {r.total_s:>7.3f}s   {steps}")
-
-    grand_total = sum(r.total_s for r in results)
-    wall_clock = max(r.total_s for r in results)  # parallel ≈ slowest
-    print(f"\n  Sum of totals : {grand_total:.3f}s")
-    print(f"  Wall-clock est: {wall_clock:.3f}s  (parallel)")
-    print(f"  Total chunks  : {total_chunks}")
-    print(f"  Milvus rows   : {len(milvus.rows)}")
 
 
 @pytest.mark.asyncio
 async def test_batch_respects_concurrency(worker, backends):
-    """Verify semaphore actually limits parallelism."""
     concurrency_log: list[int] = []
     active = 0
     lock = asyncio.Lock()

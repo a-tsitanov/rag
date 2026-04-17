@@ -14,6 +14,21 @@
 #   aiofiles  — streaming upload в POST /ingest
 #
 
+aio-pika==9.6.2
+aioboto3==15.5.0
+aiobotocore==2.25.1
+aiofiles==25.1.0
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.5
+aioitertools==0.13.0
+aiormq==6.8.1
+aiosignal==1.4.0
+aiostream==0.7.1
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.13.0
+ascii_colors==0.11.21
+attrs==26.1.0
 beautifulsoup4==4.12.3
 boto3==1.40.61
 botocore==1.40.61
@@ -61,6 +76,8 @@ langchain-classic==1.0.4
 langchain-community==0.4.1
 langchain-core==1.2.31
 langchain-experimental==0.4.1
+langchain-milvus==0.3.3
+langchain-ollama==1.1.0
 langchain-text-splitters==1.1.2
 langsmith==0.7.31
 lightrag-hku==1.4.14

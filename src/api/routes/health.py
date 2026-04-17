@@ -14,13 +14,10 @@ from lightrag import LightRAG
 from pydantic import BaseModel, Field
 
 from src.config import Settings
-from src.storage.milvus_client import AsyncMilvusClient
+from src.storage.milvus_client import check_milvus_health
 from src.storage.neo4j_client import AsyncNeo4jClient
 
 router = APIRouter(tags=["health"])
-
-
-# ── schemas ───────────────────────────────────────────────────────────
 
 
 class ServiceHealth(BaseModel):
@@ -31,8 +28,7 @@ class ServiceHealth(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["healthy", "degraded", "unhealthy"] = Field(
         ...,
-        description="``healthy``: все сервисы up, "
-        "``degraded``: часть down, ``unhealthy``: все down.",
+        description="healthy=все up, degraded=часть down, unhealthy=все down",
     )
     services: dict[str, ServiceHealth]
 
@@ -43,8 +39,7 @@ class HealthResponse(BaseModel):
 async def _check_rabbitmq(s: Settings) -> ServiceHealth:
     try:
         conn = await asyncio.wait_for(
-            aio_pika.connect(s.rabbitmq.url),
-            timeout=s.rabbitmq.timeout_s,
+            aio_pika.connect(s.rabbitmq.url), timeout=s.rabbitmq.timeout_s,
         )
         try:
             return ServiceHealth(status="up")
@@ -54,10 +49,10 @@ async def _check_rabbitmq(s: Settings) -> ServiceHealth:
         return ServiceHealth(status="down", detail=str(exc))
 
 
-async def _check_milvus(m: AsyncMilvusClient) -> ServiceHealth:
+async def _check_milvus(s: Settings) -> ServiceHealth:
     try:
-        version = await m._run(m._client.get_server_version)
-        return ServiceHealth(status="up", detail=str(version))
+        ver = await check_milvus_health()
+        return ServiceHealth(status="up", detail=str(ver))
     except Exception as exc:
         return ServiceHealth(status="down", detail=str(exc))
 
@@ -75,8 +70,7 @@ async def _check_postgres(
 ) -> ServiceHealth:
     try:
         cur = await asyncio.wait_for(
-            pg.execute("SELECT version()"),
-            timeout=s.postgres.connect_timeout_s,
+            pg.execute("SELECT version()"), timeout=s.postgres.connect_timeout_s,
         )
         row = await cur.fetchone()
         return ServiceHealth(
@@ -91,16 +85,9 @@ async def _check_ollama(
     oc: ollama.AsyncClient, s: Settings,
 ) -> ServiceHealth:
     try:
-        # Список моделей — дешёвая и достаточная проба живости API.
-        resp = await asyncio.wait_for(
-            oc.list(),
-            timeout=min(s.ollama.timeout_s, 5.0),
-        )
+        resp = await asyncio.wait_for(oc.list(), timeout=min(s.ollama.timeout_s, 5.0))
         models = [m.model for m in (resp.models or [])]
-        return ServiceHealth(
-            status="up",
-            detail=f"{len(models)} models",
-        )
+        return ServiceHealth(status="up", detail=f"{len(models)} models")
     except Exception as exc:
         return ServiceHealth(status="down", detail=str(exc))
 
@@ -120,16 +107,10 @@ async def _check_lightrag(rag: LightRAG) -> ServiceHealth:
     "/health",
     response_model=HealthResponse,
     summary="Liveness + dependency health",
-    description=(
-        "Pings every backend the API depends on and returns a per-service "
-        "status.  Use this for load-balancer / k8s probes.  **Public** — "
-        "no API key required."
-    ),
 )
 @inject
 async def health(
     settings: FromDishka[Settings],
-    milvus: FromDishka[AsyncMilvusClient],
     neo4j: FromDishka[AsyncNeo4jClient],
     pg: FromDishka[psycopg.AsyncConnection],
     ollama_client: FromDishka[ollama.AsyncClient],
@@ -137,7 +118,7 @@ async def health(
 ) -> HealthResponse:
     rmq, m, n, p, o, rg = await asyncio.gather(
         _check_rabbitmq(settings),
-        _check_milvus(milvus),
+        _check_milvus(settings),
         _check_neo4j(neo4j),
         _check_postgres(pg, settings),
         _check_ollama(ollama_client, settings),
@@ -145,12 +126,8 @@ async def health(
     )
 
     services = {
-        "rabbitmq": rmq,
-        "milvus": m,
-        "neo4j": n,
-        "postgres": p,
-        "ollama": o,
-        "lightrag": rg,
+        "rabbitmq": rmq, "milvus": m, "neo4j": n,
+        "postgres": p, "ollama": o, "lightrag": rg,
     }
 
     down = [s for s in services.values() if s.status == "down"]
