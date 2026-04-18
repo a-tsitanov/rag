@@ -2,14 +2,20 @@
 
 Pipeline
 --------
-1. Build Milvus ``expr`` from metadata filters (department, doc_type,
-   created_after/before).
-2. ``vectorstore.similarity_search_with_score`` — embeds query + searches
+1. **Stage 1 (optional)** — pre-filter by PG ``documents.summary ILIKE``
+   to narrow the search space to relevant doc_ids.
+2. Build Milvus ``expr`` from metadata filters (department, doc_type,
+   created_after/before) + doc_id whitelist from stage 1.
+3. ``vectorstore.similarity_search_with_score`` — embeds query + searches
    Milvus with the ``expr``, returns candidate chunks.
-3. Rerank with cross-encoder, keep the best ``top_k``.
-4. In parallel, call ``LightRAG.aquery`` with full QueryParam knobs
+4. Rerank with cross-encoder, keep the best ``top_k``.
+5. In parallel, call ``LightRAG.aquery`` with full QueryParam knobs
    to generate a natural-language answer.
-5. Build :class:`SearchResponse` with answer + source citations + latency.
+6. Build :class:`SearchResponse` with answer + source citations + latency.
+
+When ``decompose=True`` (Phase 2b), the query is split into sub-queries
+by LLM; each sub-query runs through steps 1-4 independently, and results
+are merged via Reciprocal Rank Fusion before step 5.
 """
 
 from __future__ import annotations
@@ -19,9 +25,15 @@ import re
 import time
 from typing import Any, Callable, Literal, Protocol
 
+import ollama
+import psycopg
+from langchain_core.documents import Document as LCDocument
+from langchain_ollama import OllamaEmbeddings
 from loguru import logger
 
 from src.models.search import SearchResponse, SourceCitation
+from src.retrieval.query_decomposer import decompose_query, rrf_merge
+from src.storage.sparse_encoder import SparseEncoder
 
 # ── type aliases ──────────────────────────────────────────────────────
 
@@ -94,12 +106,26 @@ class HybridSearcher:
         rag: _RAGLike,
         vectorstore: Any,
         reranker_fn: RerankerFn | None = None,
+        pg: psycopg.AsyncConnection | None = None,
+        ollama_client: ollama.AsyncClient | None = None,
+        embeddings: OllamaEmbeddings | None = None,
+        sparse_encoder: SparseEncoder | None = None,
+        milvus_uri: str | None = None,
+        collection_name: str | None = None,
         candidate_multiplier: int = 3,
+        two_stage_limit: int = 20,
     ):
         self._rag = rag
         self._vs = vectorstore
         self._reranker_fn = reranker_fn or _default_reranker()
+        self._pg = pg
+        self._ollama = ollama_client
+        self._embeddings = embeddings
+        self._sparse_encoder = sparse_encoder
+        self._milvus_uri = milvus_uri
+        self._collection_name = collection_name
         self._candidate_multiplier = candidate_multiplier
+        self._two_stage_limit = two_stage_limit
 
     # ── LightRAG call with full knobs ────────────────────────────────
 
@@ -134,6 +160,116 @@ class HybridSearcher:
             logger.warning("RAG query failed: {err}", err=exc)
             return ""
 
+    # ── two-stage: PG summary pre-filter (Phase 2a) ───────────────────
+
+    async def _find_relevant_doc_ids(self, query: str) -> list[str]:
+        """Stage 1: find doc_ids whose summary matches the query (ILIKE).
+
+        Returns empty list when PG is unavailable or no matches found.
+        """
+        if not self._pg:
+            return []
+        try:
+            cur = await self._pg.execute(
+                "SELECT id::text FROM documents "
+                "WHERE status = 'completed' AND summary IS NOT NULL "
+                "AND summary ILIKE %(pattern)s "
+                "LIMIT %(lim)s",
+                {"pattern": f"%{query}%", "lim": self._two_stage_limit},
+            )
+            rows = await cur.fetchall()
+            return [r[0] for r in rows]
+        except Exception as exc:
+            logger.warning("two-stage PG lookup failed: {err}", err=exc)
+            return []
+
+    # ── single-query vector search (used by search + decompose) ──────
+
+    async def _vector_search(
+        self,
+        query: str,
+        top_k: int,
+        expr: str | None,
+    ) -> list[tuple]:
+        """Embed query + search Milvus, return raw (doc, score) pairs."""
+        fetch_k = top_k * self._candidate_multiplier
+
+        # Phase 3: dense+sparse hybrid when sparse encoder is available
+        if self._sparse_encoder and self._embeddings and self._milvus_uri:
+            return await self._hybrid_vector_search(query, fetch_k, expr)
+
+        return await asyncio.to_thread(
+            self._vs.similarity_search_with_score,
+            query, k=fetch_k, expr=expr,
+        )
+
+    # ── Phase 3: dense + sparse hybrid search via pymilvus ───────────
+
+    async def _hybrid_vector_search(
+        self,
+        query: str,
+        limit: int,
+        expr: str | None,
+    ) -> list[tuple]:
+        """Hybrid search: dense HNSW + sparse BM25 via pymilvus RRFRanker."""
+        from pymilvus import AnnSearchRequest, MilvusClient, RRFRanker
+
+        # Compute both vectors
+        dense_vec = await asyncio.to_thread(
+            self._embeddings.embed_query, query,
+        )
+        sparse_vec = self._sparse_encoder.encode_query(query)
+
+        dense_req = AnnSearchRequest(
+            data=[dense_vec],
+            anns_field="embedding",
+            param={"metric_type": "COSINE", "params": {"ef": 64}},
+            limit=limit,
+            expr=expr or "",
+        )
+        sparse_req = AnnSearchRequest(
+            data=[sparse_vec],
+            anns_field="sparse_embedding",
+            param={"metric_type": "IP"},
+            limit=limit,
+            expr=expr or "",
+        )
+
+        def _search() -> list[tuple]:
+            client = MilvusClient(uri=self._milvus_uri)
+            try:
+                raw = client.hybrid_search(
+                    collection_name=self._collection_name,
+                    reqs=[dense_req, sparse_req],
+                    ranker=RRFRanker(),
+                    limit=limit,
+                    output_fields=[
+                        "content", "doc_id", "department",
+                        "doc_type", "created_at",
+                    ],
+                )
+            finally:
+                client.close()
+
+            # Convert pymilvus results → (LCDocument, score) tuples
+            results = []
+            for hit in raw[0] if raw else []:
+                entity = hit.get("entity", {})
+                doc = LCDocument(
+                    page_content=entity.get("content", ""),
+                    metadata={
+                        "doc_id": entity.get("doc_id", ""),
+                        "department": entity.get("department", ""),
+                        "doc_type": entity.get("doc_type", ""),
+                        "created_at": entity.get("created_at", 0),
+                        "id": hit.get("id", ""),
+                    },
+                )
+                results.append((doc, float(hit.get("distance", 0.0))))
+            return results
+
+        return await asyncio.to_thread(_search)
+
     # ── public API ────────────────────────────────────────────────────
 
     async def search(
@@ -155,25 +291,62 @@ class HybridSearcher:
         max_total_tokens: int = 30000,
         response_type: str = "Multiple Paragraphs",
         include_references: bool = False,
+        # Phase 2b
+        decompose: bool = False,
     ) -> SearchResponse:
         t0 = time.monotonic()
+        sub_queries: list[str] = []
 
-        # 1. build filter expression
-        expr = _build_expr(
+        # ── Phase 2b: query decomposition ────────────────────────────
+        if decompose and self._ollama:
+            sub_queries = await decompose_query(query, self._ollama)
+            logger.info(
+                "decomposed  query={q!r}  sub_queries={subs}",
+                q=query, subs=sub_queries,
+            )
+
+        queries_to_search = sub_queries if sub_queries else [query]
+
+        # ── Phase 2a: two-stage pre-filter (non-naive modes) ─────────
+        doc_id_whitelist: list[str] = []
+        if mode != "naive" and self._pg:
+            doc_id_whitelist = await self._find_relevant_doc_ids(query)
+            if doc_id_whitelist:
+                logger.info(
+                    "two-stage  matched_docs={n}",
+                    n=len(doc_id_whitelist),
+                )
+
+        # 1. build base filter expression
+        base_expr = _build_expr(
             department=department,
             doc_type_filter=doc_type_filter,
             created_after=created_after,
             created_before=created_before,
         )
 
-        # 2. vectorstore: embed query + search Milvus
-        fetch_k = top_k * self._candidate_multiplier
-        results = await asyncio.to_thread(
-            self._vs.similarity_search_with_score,
-            query, k=fetch_k, expr=expr,
-        )
+        # add doc_id whitelist from stage-1
+        if doc_id_whitelist:
+            ids_literal = ", ".join(f'"{d}"' for d in doc_id_whitelist)
+            doc_filter = f"doc_id in [{ids_literal}]"
+            expr = f"{base_expr} and {doc_filter}" if base_expr else doc_filter
+        else:
+            expr = base_expr
 
-        # 3. rerank + RAG answer — in parallel
+        # 2. vector search (parallel for decomposed sub-queries)
+        search_tasks = [
+            self._vector_search(q, top_k, expr)
+            for q in queries_to_search
+        ]
+        all_results = await asyncio.gather(*search_tasks)
+
+        # 3. merge results (RRF if multiple sub-queries, plain if single)
+        if len(all_results) > 1:
+            merged = rrf_merge(all_results)[:top_k * self._candidate_multiplier]
+        else:
+            merged = all_results[0]
+
+        # 4. rerank + RAG answer — in parallel
         rag_task = asyncio.create_task(self._ask_rag(
             query, mode,
             top_k=top_k,
@@ -184,20 +357,30 @@ class HybridSearcher:
             response_type=response_type,
             include_references=include_references,
         ))
-        sources = self._rerank(query, results, top_k)
+        sources = self._rerank(query, merged, top_k)
+
+        # 4b. fallback: if two-stage narrowed too much, retry without whitelist
+        if doc_id_whitelist and not sources:
+            logger.info("two-stage returned 0 sources, falling back to full search")
+            fallback_results = await self._vector_search(query, top_k, base_expr)
+            sources = self._rerank(query, fallback_results, top_k)
+
         answer = await rag_task
 
         latency_ms = (time.monotonic() - t0) * 1000.0
 
         logger.info(
             "search  query={q!r}  mode={mode}  dept={dept}  "
-            "expr={expr}  sources={n}  latency_ms={ms:.1f}",
+            "expr={expr}  sources={n}  decomposed={decomp}  "
+            "sub_queries={subs}  latency_ms={ms:.1f}",
             q=query, mode=mode, dept=department,
-            expr=expr, n=len(sources), ms=latency_ms,
+            expr=expr, n=len(sources), decomp=decompose,
+            subs=sub_queries, ms=latency_ms,
         )
         return SearchResponse(
             query=query, answer=answer, mode=mode,
             sources=sources, latency_ms=latency_ms,
+            sub_queries=sub_queries if sub_queries else None,
         )
 
     # ── reranker ──────────────────────────────────────────────────────

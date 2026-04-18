@@ -30,6 +30,7 @@ from src.ingestion.worker import (
 from src.retrieval.hybrid_search import HybridSearcher, RerankerFn
 from src.retrieval.lightrag_setup import close_rag_graph, create_rag
 from src.storage.neo4j_client import AsyncNeo4jClient
+from src.storage.sparse_encoder import SparseEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,10 @@ class CommonProvider(Provider):
     def reranker_fn(self) -> RerankerFn:
         return _stub_reranker
 
+    @provide
+    def sparse_encoder(self) -> SparseEncoder:
+        return SparseEncoder()
+
 
 # ── api provider ─────────────────────────────────────────────────────
 
@@ -182,12 +187,21 @@ class ApiProvider(Provider):
     @provide
     def searcher(
         self,
+        s: Settings,
         rag: LightRAG,
         vs: Milvus,
         rerank: RerankerFn,
+        pg: psycopg.AsyncConnection,
+        oc: ollama.AsyncClient,
+        emb: OllamaEmbeddings,
+        sparse: SparseEncoder,
     ) -> HybridSearcher:
         return HybridSearcher(
             rag=rag, vectorstore=vs, reranker_fn=rerank,
+            pg=pg, ollama_client=oc,
+            embeddings=emb, sparse_encoder=sparse,
+            milvus_uri=f"http://{s.milvus.host}:{s.milvus.port}",
+            collection_name=s.milvus.collection,
         )
 
 
@@ -228,6 +242,8 @@ class WorkerProvider(Provider):
         status: PGStatusUpdater,
         chunker: SemanticChunker,
         oc: ollama.AsyncClient,
+        emb: OllamaEmbeddings,
+        sparse: SparseEncoder,
     ) -> AsyncDocumentWorker:
         return AsyncDocumentWorker(
             vectorstore=vs,
@@ -235,6 +251,8 @@ class WorkerProvider(Provider):
             pg_status_updater=status,
             chunker=chunker,
             ollama_client=oc,
+            embeddings=emb,
+            sparse_encoder=sparse,
         )
 
 

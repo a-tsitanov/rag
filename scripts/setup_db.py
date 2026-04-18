@@ -130,6 +130,10 @@ def setup_milvus() -> bool:
                     dim=settings.ollama.embedding_dim,
                 ),
                 FieldSchema(
+                    name="sparse_embedding",
+                    dtype=DataType.SPARSE_FLOAT_VECTOR,
+                ),
+                FieldSchema(
                     name="doc_id", dtype=DataType.VARCHAR, max_length=128
                 ),
                 FieldSchema(
@@ -149,6 +153,11 @@ def setup_milvus() -> bool:
             metric_type="COSINE",
             params={"M": HNSW_M, "efConstruction": HNSW_EF_CONSTRUCTION},
         )
+        index_params.add_index(
+            field_name="sparse_embedding",
+            index_type="SPARSE_INVERTED_INDEX",
+            metric_type="IP",
+        )
 
         client.create_collection(
             collection_name=collection,
@@ -156,7 +165,7 @@ def setup_milvus() -> bool:
             index_params=index_params,
         )
         client.close()
-        _ok("created (7 fields, HNSW index)")
+        _ok("created (8 fields, HNSW + sparse index)")
         return True
     except Exception as e:
         return _fail(e)

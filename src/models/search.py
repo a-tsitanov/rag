@@ -64,3 +64,6 @@ class SearchResponse(BaseModel):
     mode: str
     sources: list[SourceCitation] = Field(default_factory=list)
     latency_ms: float = 0.0
+    sub_queries: list[str] | None = Field(
+        None, description="Sub-queries from decomposition (Phase 2b), null if not used.",
+    )

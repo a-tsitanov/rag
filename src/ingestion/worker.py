@@ -22,11 +22,13 @@ from typing import Any, Callable, Coroutine
 
 import ollama
 from langchain_core.documents import Document as LCDocument
+from langchain_ollama import OllamaEmbeddings
 from loguru import logger
 
 from src.config import settings
 from src.ingestion.chunker import Chunk, SemanticChunker
 from src.ingestion.parser import DocumentParser, ParsedDocument
+from src.storage.sparse_encoder import SparseEncoder
 
 # ── result / status ───────────────────────────────────────────────────
 
@@ -94,6 +96,8 @@ class AsyncDocumentWorker:
         ollama_client: ollama.AsyncClient | None = None,
         parser: DocumentParser | None = None,
         chunker: SemanticChunker | None = None,
+        embeddings: OllamaEmbeddings | None = None,
+        sparse_encoder: SparseEncoder | None = None,
     ):
         self._parser = parser or DocumentParser()
         self._chunker = chunker
@@ -101,6 +105,8 @@ class AsyncDocumentWorker:
         self._lightrag_insert = lightrag_inserter
         self._pg_status = pg_status_updater
         self._ollama = ollama_client
+        self._embeddings = embeddings
+        self._sparse_encoder = sparse_encoder
 
     @staticmethod
     def _now() -> float:
@@ -116,6 +122,50 @@ class AsyncDocumentWorker:
             error=payload.error,
             summary=payload.summary,
         )
+
+    async def _write_hybrid(
+        self,
+        texts: list[str],
+        ids: list[str],
+        doc_id: str,
+        department: str,
+        doc_type: str,
+        created_at: int,
+    ) -> None:
+        """Write dense + sparse vectors to Milvus via pymilvus."""
+        from pymilvus import MilvusClient
+
+        dense_vectors = await asyncio.to_thread(
+            self._embeddings.embed_documents, texts,
+        )
+        sparse_vectors = [
+            self._sparse_encoder.encode_document(t) for t in texts
+        ]
+
+        data = [
+            {
+                "id": cid,
+                "content": text,
+                "embedding": dvec,
+                "sparse_embedding": svec,
+                "doc_id": doc_id,
+                "department": department,
+                "doc_type": doc_type,
+                "created_at": created_at,
+            }
+            for cid, text, dvec, svec in zip(
+                ids, texts, dense_vectors, sparse_vectors,
+            )
+        ]
+
+        uri = f"http://{settings.milvus.host}:{settings.milvus.port}"
+        client = MilvusClient(uri=uri)
+        try:
+            await asyncio.to_thread(
+                client.insert, settings.milvus.collection, data,
+            )
+        finally:
+            client.close()
 
     async def process_document(
         self,
@@ -178,26 +228,34 @@ class AsyncDocumentWorker:
             if not chunks:
                 raise ValueError("chunker produced zero chunks")
 
-            # 3. vectorstore.add_documents (embed + write → Milvus)
+            # 3. vectorstore write (embed + write → Milvus)
             t0 = self._now()
             now_ts = int(time.time())
-            lc_docs = [
-                LCDocument(
-                    page_content=c.content,
-                    metadata={
-                        "doc_id": doc_id,
-                        "department": department,
-                        "doc_type": doc_type,
-                        "created_at": now_ts,
-                    },
-                )
-                for c in chunks
-            ]
             ids = [c.chunk_id for c in chunks]
+            texts = [c.content for c in chunks]
 
-            await asyncio.to_thread(
-                self._vectorstore.add_documents, lc_docs, ids=ids,
-            )
+            if self._sparse_encoder and self._embeddings:
+                # Phase 3: hybrid write — dense + sparse via pymilvus
+                await self._write_hybrid(
+                    texts, ids, doc_id, department, doc_type, now_ts,
+                )
+            else:
+                # Fallback: langchain write (dense only)
+                lc_docs = [
+                    LCDocument(
+                        page_content=text,
+                        metadata={
+                            "doc_id": doc_id,
+                            "department": department,
+                            "doc_type": doc_type,
+                            "created_at": now_ts,
+                        },
+                    )
+                    for text in texts
+                ]
+                await asyncio.to_thread(
+                    self._vectorstore.add_documents, lc_docs, ids=ids,
+                )
             timings.append(StepTiming("vectorstore", self._now() - t0))
 
             # 4. LightRAG entity extraction (свой pipeline)

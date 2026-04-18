@@ -56,6 +56,8 @@ async def search(
             max_total_tokens=req.max_total_tokens,
             response_type=req.response_type,
             include_references=req.include_references,
+            # Phase 2b: query decomposition
+            decompose=req.decompose,
         )
     except HTTPException:
         raise
