@@ -3,7 +3,7 @@
 Topology
 --------
 * ``CommonProvider`` — infra shared by API and worker: Milvus vectorstore
-  (langchain), Neo4j, Postgres, OllamaEmbeddings, reranker.
+  (langchain), Neo4j, Postgres, Ollama embeddings, reranker.
 * ``ApiProvider``    — LightRAG + ``HybridSearcher`` for the HTTP service.
 * ``WorkerProvider`` — LightRAG + ``AsyncDocumentWorker`` for ingestion.
 """
@@ -12,13 +12,72 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 import ollama
 import psycopg
 from dishka import Provider, Scope, provide
+from langchain_core.embeddings import Embeddings
 from langchain_milvus import Milvus
-from langchain_ollama import OllamaEmbeddings
 from lightrag import LightRAG
+from pymilvus import MilvusClient, connections as _pymilvus_connections
+
+
+# ── MilvusClient ↔ ORM bridge ────────────────────────────────────────
+#
+# ``langchain_milvus.Milvus`` creates an internal ``MilvusClient``, reads its
+# auto-generated ``_using`` alias, and then calls ``Collection(name,
+# using=alias)`` — which goes through the pymilvus **ORM** registry
+# (``pymilvus.orm.connections``).  MilvusClient never registers itself
+# there, so the ORM-side ``Collection()`` raises
+# ``ConnectionNotExistException`` the first time any new MilvusClient is
+# instantiated (fresh process — taskiq worker, test, cold import).
+#
+# We patch ``MilvusClient.__init__`` once so every instance also registers
+# its alias with the ORM.  Idempotent; safe to call from multiple
+# providers / processes.
+
+_MILVUS_PATCHED = False
+
+
+def _patch_milvus_client_to_register_orm() -> None:
+    global _MILVUS_PATCHED
+    if _MILVUS_PATCHED:
+        return
+    _MILVUS_PATCHED = True
+
+    _orig_init = MilvusClient.__init__
+
+    def _patched_init(
+        self,
+        uri: str = "http://localhost:19530",
+        user: str = "",
+        password: str = "",
+        db_name: str = "",
+        token: str = "",
+        timeout=None,
+        **kwargs,
+    ) -> None:
+        _orig_init(
+            self, uri=uri, user=user, password=password,
+            db_name=db_name, token=token, timeout=timeout, **kwargs,
+        )
+        try:
+            _pymilvus_connections.connect(
+                alias=self._using,
+                uri=uri, user=user, password=password,
+                db_name=db_name, token=token,
+            )
+        except Exception as exc:  # pragma: no cover — best effort
+            logging.getLogger(__name__).warning(
+                "could not bridge MilvusClient alias %s to ORM: %s",
+                self._using, exc,
+            )
+
+    MilvusClient.__init__ = _patched_init
+
+
+_patch_milvus_client_to_register_orm()
 
 from src.config import Settings, settings
 from src.ingestion.chunker import SemanticChunker
@@ -27,6 +86,7 @@ from src.ingestion.worker import (
     LightRAGInserter,
     PGStatusUpdater,
 )
+from src.llm_client import LLMClient
 from src.retrieval.hybrid_search import HybridSearcher, RerankerFn
 from src.retrieval.lightrag_setup import close_rag_graph, create_rag
 from src.storage.neo4j_client import AsyncNeo4jClient
@@ -75,10 +135,11 @@ class CommonProvider(Provider):
     def settings(self) -> Settings:
         return settings
 
-    # ── embeddings (langchain-ollama) ────────────────────────────────
+    # ── embeddings (langchain — Ollama) ──────────────────────────────
 
     @provide
-    def embeddings(self, s: Settings) -> OllamaEmbeddings:
+    def embeddings(self, s: Settings) -> Embeddings:
+        from langchain_ollama import OllamaEmbeddings
         return OllamaEmbeddings(
             model=s.ollama.embedding_model,
             base_url=s.ollama.host,
@@ -87,13 +148,17 @@ class CommonProvider(Provider):
     # ── vectorstore (langchain-milvus) ───────────────────────────────
 
     @provide
-    def vectorstore(self, s: Settings, emb: OllamaEmbeddings) -> Milvus:
+    def vectorstore(self, s: Settings, emb: Embeddings) -> Milvus:
+        # MilvusClient ↔ ORM bridge is patched at module load
+        # (see _patch_milvus_client_to_register_orm above) — every
+        # MilvusClient the langchain wrapper creates registers its alias
+        # with pymilvus.orm.connections, so Collection(using=alias) works.
+        milvus_uri = f"http://{s.milvus.host}:{s.milvus.port}"
+
         return Milvus(
             embedding_function=emb,
             collection_name=s.milvus.collection,
-            connection_args={
-                "uri": f"http://{s.milvus.host}:{s.milvus.port}",
-            },
+            connection_args={"uri": milvus_uri},
             primary_field="id",
             text_field="content",
             vector_field="embedding",
@@ -154,8 +219,18 @@ class CommonProvider(Provider):
             await pg.execute(_UPSERT_DOC, payload)
         return _update
 
-    # ── ollama client (for health check + LightRAG host passing) ─────
+    # ── LLM client (Ollama) ──────────────────────────────────────────
 
+    @provide
+    def llm_client(self, s: Settings) -> LLMClient:
+        return LLMClient(
+            provider="ollama",
+            _client=ollama.AsyncClient(
+                host=s.ollama.host, timeout=s.ollama.timeout_s,
+            ),
+        )
+
+    # Keep raw ollama client for health checks
     @provide
     def ollama_client(self, s: Settings) -> ollama.AsyncClient:
         return ollama.AsyncClient(host=s.ollama.host, timeout=s.ollama.timeout_s)
@@ -192,13 +267,13 @@ class ApiProvider(Provider):
         vs: Milvus,
         rerank: RerankerFn,
         pg: psycopg.AsyncConnection,
-        oc: ollama.AsyncClient,
-        emb: OllamaEmbeddings,
+        llm: LLMClient,
+        emb: Embeddings,
         sparse: SparseEncoder,
     ) -> HybridSearcher:
         return HybridSearcher(
             rag=rag, vectorstore=vs, reranker_fn=rerank,
-            pg=pg, ollama_client=oc,
+            pg=pg, llm_client=llm,
             embeddings=emb, sparse_encoder=sparse,
             milvus_uri=f"http://{s.milvus.host}:{s.milvus.port}",
             collection_name=s.milvus.collection,
@@ -227,7 +302,7 @@ class WorkerProvider(Provider):
         return _insert
 
     @provide
-    def chunker(self, emb: OllamaEmbeddings, s: Settings) -> SemanticChunker:
+    def chunker(self, emb: Embeddings, s: Settings) -> SemanticChunker:
         return SemanticChunker(
             embeddings=emb,
             max_tokens=s.ingestion.chunk_size,
@@ -241,8 +316,8 @@ class WorkerProvider(Provider):
         inserter: LightRAGInserter,
         status: PGStatusUpdater,
         chunker: SemanticChunker,
-        oc: ollama.AsyncClient,
-        emb: OllamaEmbeddings,
+        llm: LLMClient,
+        emb: Embeddings,
         sparse: SparseEncoder,
     ) -> AsyncDocumentWorker:
         return AsyncDocumentWorker(
@@ -250,7 +325,7 @@ class WorkerProvider(Provider):
             lightrag_inserter=inserter,
             pg_status_updater=status,
             chunker=chunker,
-            ollama_client=oc,
+            llm_client=llm,
             embeddings=emb,
             sparse_encoder=sparse,
         )

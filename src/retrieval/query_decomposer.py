@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import json
 
-import ollama
 from loguru import logger
 
 from src.config import settings
+from src.llm_client import LLMClient
 
 _DECOMPOSE_PROMPT = (
     "You are a search query decomposer. "
@@ -25,7 +25,7 @@ _DECOMPOSE_PROMPT = (
 
 async def decompose_query(
     query: str,
-    client: ollama.AsyncClient,
+    client: LLMClient,
 ) -> list[str]:
     """Ask LLM to split *query* into 1-3 sub-queries.
 
@@ -33,7 +33,7 @@ async def decompose_query(
     """
     try:
         resp = await client.chat(
-            model=settings.ollama.model,
+            model=settings.effective_llm_model,
             messages=[
                 {"role": "system", "content": _DECOMPOSE_PROMPT},
                 {"role": "user", "content": query},

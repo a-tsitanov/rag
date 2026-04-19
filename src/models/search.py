@@ -43,9 +43,13 @@ class SearchRequest(BaseModel):
     max_relation_tokens: int = Field(8000, description="Бюджет на relations.")
     max_total_tokens: int = Field(30000, description="Общий бюджет контекста для LLM.")
 
-    # ── smart features (Phase 2+4, пока заглушки) ────────────────────
+    # ── smart features (Phase 2b + Phase 4) ────────────────────────────
     decompose: bool = Field(False, description="Декомпозировать запрос на подвопросы (Phase 2b).")
     agentic: bool = Field(False, description="Итеративный multi-hop поиск (Phase 4).")
+    agentic_max_rounds: int = Field(
+        3, ge=1, le=5,
+        description="Макс. итераций agentic search (1-5).",
+    )
 
 
 class SourceCitation(BaseModel):
@@ -66,4 +70,10 @@ class SearchResponse(BaseModel):
     latency_ms: float = 0.0
     sub_queries: list[str] | None = Field(
         None, description="Sub-queries from decomposition (Phase 2b), null if not used.",
+    )
+    agentic_rounds: int | None = Field(
+        None, description="Число раундов agentic search, null если не agentic.",
+    )
+    follow_up_queries: list[str] | None = Field(
+        None, description="Follow-up запросы от LLM judge (agentic mode).",
     )

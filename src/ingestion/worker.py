@@ -20,14 +20,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
-import ollama
 from langchain_core.documents import Document as LCDocument
-from langchain_ollama import OllamaEmbeddings
+from langchain_core.embeddings import Embeddings
 from loguru import logger
 
 from src.config import settings
 from src.ingestion.chunker import Chunk, SemanticChunker
 from src.ingestion.parser import DocumentParser, ParsedDocument
+from src.llm_client import LLMClient
 from src.storage.sparse_encoder import SparseEncoder
 
 # ── result / status ───────────────────────────────────────────────────
@@ -93,10 +93,10 @@ class AsyncDocumentWorker:
         vectorstore: VectorStoreProto,
         lightrag_inserter: LightRAGInserter,
         pg_status_updater: PGStatusUpdater,
-        ollama_client: ollama.AsyncClient | None = None,
+        llm_client: LLMClient | None = None,
         parser: DocumentParser | None = None,
         chunker: SemanticChunker | None = None,
-        embeddings: OllamaEmbeddings | None = None,
+        embeddings: Embeddings | None = None,
         sparse_encoder: SparseEncoder | None = None,
     ):
         self._parser = parser or DocumentParser()
@@ -104,7 +104,7 @@ class AsyncDocumentWorker:
         self._vectorstore = vectorstore
         self._lightrag_insert = lightrag_inserter
         self._pg_status = pg_status_updater
-        self._ollama = ollama_client
+        self._llm = llm_client
         self._embeddings = embeddings
         self._sparse_encoder = sparse_encoder
 
@@ -197,13 +197,13 @@ class AsyncDocumentWorker:
 
             department = department or doc.metadata.get("department", "")
 
-            # 1b. summarize (if enabled + ollama client available)
+            # 1b. summarize (if enabled + LLM client available)
             summary = ""
-            if settings.ingestion.summary_enabled and self._ollama and doc.text:
+            if settings.ingestion.summary_enabled and self._llm and doc.text:
                 t1 = self._now()
                 try:
-                    resp = await self._ollama.chat(
-                        model=settings.ollama.model,
+                    resp = await self._llm.chat(
+                        model=settings.effective_llm_model,
                         messages=[
                             {"role": "system", "content": settings.ingestion.summary_prompt},
                             {"role": "user", "content": doc.text[:8000]},

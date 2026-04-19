@@ -66,9 +66,7 @@ async def create_rag(
     Caller owns teardown.  For the Neo4j backend call
     :func:`close_rag_graph` on the returned instance to close the driver.
     """
-    # Lazy imports so this module is importable without torch.
     from lightrag import LightRAG
-    from lightrag.llm.ollama import ollama_embed, ollama_model_complete
     from lightrag.utils import EmbeddingFunc
 
     _export_neo4j_env()
@@ -83,11 +81,9 @@ async def create_rag(
 
     Path(wd).mkdir(parents=True, exist_ok=True)
 
-    # ``ollama_embed`` уже декорирован
-    # ``@wrap_embedding_func_with_attrs(embedding_dim=1024, ...)`` под BGE-M3,
-    # и его внутренний валидатор будет ругаться на любую dim ≠ 1024.
-    # Берём ``.func`` чтобы обойти вложенный wrapper — свой ``EmbeddingFunc``
-    # (ниже) проверит dim против настоящей размерности модели пользователя.
+    # ── Ollama backend ────────────────────────────────────────────────
+    from lightrag.llm.ollama import ollama_embed, ollama_model_complete
+
     _ollama_embed_raw = getattr(ollama_embed, "func", ollama_embed)
 
     async def _embed(texts: list[str]) -> list:
@@ -105,13 +101,16 @@ async def create_rag(
         llm_model_name=llm_name,
         embedding_func=embedding_func,
         graph_storage=graph_kind,
-        # Длительные таймауты — Ollama на CPU часто думает минутами.
         default_llm_timeout=settings.lightrag.llm_timeout_s,
         default_embedding_timeout=settings.lightrag.embedding_timeout_s,
         llm_model_max_async=settings.lightrag.max_async,
-        # Пробрасываем host в ollama_model_complete / ollama_embed, чтобы
-        # они обращались не к localhost контейнера, а к нашему Ollama.
-        llm_model_kwargs={"host": settings.ollama.host},
+        llm_model_kwargs={
+            "host": settings.ollama.host,
+            # Ollama дефолт num_ctx=2048 режет LightRAG entity-extraction
+            # prompt (system_prompt + chunk часто > 2k токенов).
+            # options передаются через ollama.AsyncClient.generate(...).
+            "options": {"num_ctx": settings.lightrag.num_ctx},
+        },
     )
 
     # LightRAG 1.4+ requires explicit storage initialization before any

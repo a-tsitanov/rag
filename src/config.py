@@ -109,13 +109,6 @@ class OllamaSettings(BaseSettings):
     timeout_s: float = 600.0
 
 
-class OpenAISettings(BaseSettings):
-    model_config = _sub("OPENAI_")
-
-    api_key: str = ""
-    llm_model: str = "gpt-4o-mini"
-
-
 class RabbitMQSettings(BaseSettings):
     model_config = _sub("RABBITMQ_")
 
@@ -146,7 +139,7 @@ class LightRAGSettings(BaseSettings):
     """Knobs for LightRAG itself.
 
     Empty strings / ``0`` for model/dim mean "fall back to the shared
-    OllamaSettings values" — resolved via
+    :class:`OllamaSettings` values" — resolved via
     :meth:`Settings.effective_lightrag_llm_model` etc.
     """
 
@@ -168,6 +161,12 @@ class LightRAGSettings(BaseSettings):
     # локальных машин ставь 1-2, иначе параллельные запросы забивают
     # очередь в Ollama.
     max_async: int = 2
+    # Контекстное окно модели в токенах. Прокидывается в Ollama через
+    # options.num_ctx — дефолт Ollama = 2048 режет entity-extraction
+    # prompt (chunk + system prompt ≈ 2000 ток. → 400 "input length
+    # exceeds context length"). Держи ≥ 8192 для нормальной работы
+    # LightRAG; для больших документов поднимай до 16384-32768.
+    num_ctx: int = 16384
 
 
 class IngestionSettings(BaseSettings):
@@ -202,13 +201,12 @@ class Settings(BaseSettings):
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
-    openai: OpenAISettings = Field(default_factory=OpenAISettings)
     rabbitmq: RabbitMQSettings = Field(default_factory=RabbitMQSettings)
     taskiq: TaskiqSettings = Field(default_factory=TaskiqSettings)
     lightrag: LightRAGSettings = Field(default_factory=LightRAGSettings)
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
 
-    # ── LightRAG effective values (fallback to Ollama shared config) ──
+    # ── LightRAG effective values ────────────────────────────────────
 
     @property
     def effective_lightrag_llm_model(self) -> str:
@@ -221,6 +219,11 @@ class Settings(BaseSettings):
     @property
     def effective_lightrag_embedding_dim(self) -> int:
         return self.lightrag.embedding_dim or self.ollama.embedding_dim
+
+    @property
+    def effective_llm_model(self) -> str:
+        """Model name for direct LLM calls (judge, decomposer, summaries)."""
+        return self.ollama.model
 
 
 settings = Settings()

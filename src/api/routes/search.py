@@ -7,7 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from loguru import logger
 
 from src.api.auth import require_api_key
+from src.llm_client import LLMClient
 from src.models.search import SearchRequest, SearchResponse
+from src.retrieval.agent_search import agentic_search
 from src.retrieval.hybrid_search import HybridSearcher
 
 router = APIRouter(tags=["search"])
@@ -25,6 +27,10 @@ router = APIRouter(tags=["search"])
         "2. Reranks candidates.\n"
         "3. Calls LightRAG to generate a natural-language answer with "
         "configurable QueryParam knobs.\n\n"
+        "**Agentic mode** (``agentic=true``): iterative multi-hop search. "
+        "After each round the LLM judges whether the context is sufficient; "
+        "if not, it generates a follow-up query and searches again "
+        "(up to ``agentic_max_rounds`` iterations).\n\n"
         "Returns ``answer``, ``sources``, and ``latency_ms``."
     ),
     responses={
@@ -37,26 +43,45 @@ router = APIRouter(tags=["search"])
 async def search(
     req: SearchRequest,
     searcher: FromDishka[HybridSearcher],
+    llm_client: FromDishka[LLMClient],
 ) -> SearchResponse:
     try:
+        if req.agentic:
+            return await agentic_search(
+                searcher=searcher,
+                query=req.query,
+                ollama_client=llm_client,
+                max_rounds=req.agentic_max_rounds,
+                mode=req.mode,  # type: ignore[arg-type]
+                department=req.department,
+                top_k=req.top_k,
+                user_id=req.user_id,
+                doc_type_filter=req.doc_type_filter,
+                created_after=req.created_after,
+                created_before=req.created_before,
+                chunk_top_k=req.chunk_top_k,
+                max_entity_tokens=req.max_entity_tokens,
+                max_relation_tokens=req.max_relation_tokens,
+                max_total_tokens=req.max_total_tokens,
+                response_type=req.response_type,
+                include_references=req.include_references,
+            )
+
         return await searcher.search(
             query=req.query,
             mode=req.mode,  # type: ignore[arg-type]
             department=req.department,
             top_k=req.top_k,
             user_id=req.user_id,
-            # Phase 1a: metadata filters
             doc_type_filter=req.doc_type_filter,
             created_after=req.created_after,
             created_before=req.created_before,
-            # Phase 1b: LightRAG QueryParam knobs
             chunk_top_k=req.chunk_top_k,
             max_entity_tokens=req.max_entity_tokens,
             max_relation_tokens=req.max_relation_tokens,
             max_total_tokens=req.max_total_tokens,
             response_type=req.response_type,
             include_references=req.include_references,
-            # Phase 2b: query decomposition
             decompose=req.decompose,
         )
     except HTTPException:

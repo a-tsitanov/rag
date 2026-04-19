@@ -97,7 +97,6 @@ networkx==3.6.1
 nltk==3.9.4
 numpy==2.4.4
 ollama==0.6.1
-openai==2.31.0
 orjson==3.11.8
 packaging==25.0
 pamqp==3.3.0

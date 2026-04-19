@@ -127,7 +127,7 @@ def setup_milvus() -> bool:
                 FieldSchema(
                     name="embedding",
                     dtype=DataType.FLOAT_VECTOR,
-                    dim=settings.ollama.embedding_dim,
+                    dim=settings.effective_lightrag_embedding_dim,
                 ),
                 FieldSchema(
                     name="sparse_embedding",

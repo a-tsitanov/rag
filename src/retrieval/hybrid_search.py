@@ -25,12 +25,12 @@ import re
 import time
 from typing import Any, Callable, Literal, Protocol
 
-import ollama
 import psycopg
 from langchain_core.documents import Document as LCDocument
-from langchain_ollama import OllamaEmbeddings
+from langchain_core.embeddings import Embeddings
 from loguru import logger
 
+from src.llm_client import LLMClient
 from src.models.search import SearchResponse, SourceCitation
 from src.retrieval.query_decomposer import decompose_query, rrf_merge
 from src.storage.sparse_encoder import SparseEncoder
@@ -107,8 +107,8 @@ class HybridSearcher:
         vectorstore: Any,
         reranker_fn: RerankerFn | None = None,
         pg: psycopg.AsyncConnection | None = None,
-        ollama_client: ollama.AsyncClient | None = None,
-        embeddings: OllamaEmbeddings | None = None,
+        llm_client: LLMClient | None = None,
+        embeddings: Embeddings | None = None,
         sparse_encoder: SparseEncoder | None = None,
         milvus_uri: str | None = None,
         collection_name: str | None = None,
@@ -119,13 +119,43 @@ class HybridSearcher:
         self._vs = vectorstore
         self._reranker_fn = reranker_fn or _default_reranker()
         self._pg = pg
-        self._ollama = ollama_client
+        self._llm_client = llm_client
         self._embeddings = embeddings
         self._sparse_encoder = sparse_encoder
         self._milvus_uri = milvus_uri
         self._collection_name = collection_name
         self._candidate_multiplier = candidate_multiplier
         self._two_stage_limit = two_stage_limit
+
+    # ── LightRAG: graph data without LLM (Phase 4) ────────────────────
+
+    async def query_graph_data(
+        self,
+        query: str,
+        mode: SearchMode = "hybrid",
+        *,
+        top_k: int = 10,
+        chunk_top_k: int = 20,
+        max_entity_tokens: int = 6000,
+        max_relation_tokens: int = 8000,
+        max_total_tokens: int = 30000,
+    ) -> dict:
+        """Get entities, relations, chunks from KG without LLM call."""
+        from lightrag import QueryParam
+
+        param = QueryParam(
+            mode=mode,
+            top_k=top_k,
+            chunk_top_k=chunk_top_k,
+            max_entity_tokens=max_entity_tokens,
+            max_relation_tokens=max_relation_tokens,
+            max_total_tokens=max_total_tokens,
+        )
+        try:
+            return await self._rag.aquery_data(query, param=param)
+        except Exception as exc:
+            logger.warning("graph data query failed: {err}", err=exc)
+            return {}
 
     # ── LightRAG call with full knobs ────────────────────────────────
 
@@ -293,13 +323,15 @@ class HybridSearcher:
         include_references: bool = False,
         # Phase 2b
         decompose: bool = False,
+        # Phase 4: agentic rounds skip RAG LLM call
+        skip_rag: bool = False,
     ) -> SearchResponse:
         t0 = time.monotonic()
         sub_queries: list[str] = []
 
         # ── Phase 2b: query decomposition ────────────────────────────
-        if decompose and self._ollama:
-            sub_queries = await decompose_query(query, self._ollama)
+        if decompose and self._llm_client:
+            sub_queries = await decompose_query(query, self._llm_client)
             logger.info(
                 "decomposed  query={q!r}  sub_queries={subs}",
                 q=query, subs=sub_queries,
@@ -346,17 +378,19 @@ class HybridSearcher:
         else:
             merged = all_results[0]
 
-        # 4. rerank + RAG answer — in parallel
-        rag_task = asyncio.create_task(self._ask_rag(
-            query, mode,
-            top_k=top_k,
-            chunk_top_k=chunk_top_k,
-            max_entity_tokens=max_entity_tokens,
-            max_relation_tokens=max_relation_tokens,
-            max_total_tokens=max_total_tokens,
-            response_type=response_type,
-            include_references=include_references,
-        ))
+        # 4. rerank + RAG answer — in parallel (skip RAG in agentic rounds)
+        if not skip_rag:
+            rag_task = asyncio.create_task(self._ask_rag(
+                query, mode,
+                top_k=top_k,
+                chunk_top_k=chunk_top_k,
+                max_entity_tokens=max_entity_tokens,
+                max_relation_tokens=max_relation_tokens,
+                max_total_tokens=max_total_tokens,
+                response_type=response_type,
+                include_references=include_references,
+            ))
+
         sources = self._rerank(query, merged, top_k)
 
         # 4b. fallback: if two-stage narrowed too much, retry without whitelist
@@ -365,7 +399,7 @@ class HybridSearcher:
             fallback_results = await self._vector_search(query, top_k, base_expr)
             sources = self._rerank(query, fallback_results, top_k)
 
-        answer = await rag_task
+        answer = (await rag_task) if not skip_rag else ""
 
         latency_ms = (time.monotonic() - t0) * 1000.0
 
