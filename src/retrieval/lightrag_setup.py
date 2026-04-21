@@ -103,7 +103,12 @@ async def create_rag(
         graph_storage=graph_kind,
         default_llm_timeout=settings.lightrag.llm_timeout_s,
         default_embedding_timeout=settings.lightrag.embedding_timeout_s,
+        # ── concurrency knobs (see LightRAGSettings for rationale) ───
         llm_model_max_async=settings.lightrag.max_async,
+        embedding_func_max_async=settings.lightrag.embedding_func_max_async,
+        embedding_batch_num=settings.lightrag.embedding_batch_num,
+        max_parallel_insert=settings.lightrag.max_parallel_insert,
+        entity_extract_max_gleaning=settings.lightrag.entity_extract_max_gleaning,
         llm_model_kwargs={
             "host": settings.ollama.host,
             # Ollama дефолт num_ctx=2048 режет LightRAG entity-extraction

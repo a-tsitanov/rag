@@ -167,6 +167,20 @@ class LightRAGSettings(BaseSettings):
     # exceeds context length"). Держи ≥ 8192 для нормальной работы
     # LightRAG; для больших документов поднимай до 16384-32768.
     num_ctx: int = 16384
+    # Параллельные эмбеддинг-вызовы. LightRAG-дефолт 8. Ollama на CPU
+    # захлебнётся >4, на GPU смело 16-32.
+    embedding_func_max_async: int = 8
+    # Размер батча в одном embed-вызове. Дефолт 10; для больших
+    # документов можно поднять до 32, если embed-модель поддерживает.
+    embedding_batch_num: int = 10
+    # Сколько документов обрабатывать одновременно (семафор вокруг
+    # ainsert). LightRAG-дефолт 2. Подними до 4-8 если taskiq worker
+    # запущен с --max-async-tasks 4+, иначе лишние tasks будут ждать.
+    max_parallel_insert: int = 2
+    # Сколько дополнительных проходов LLM делает на один чанк чтобы
+    # добрать пропущенные сущности. 0 → только primary extract, 1 → +1
+    # glean, 2 → +2. Каждый проход = отдельный LLM-вызов → растёт время.
+    entity_extract_max_gleaning: int = 1
 
 
 class IngestionSettings(BaseSettings):
