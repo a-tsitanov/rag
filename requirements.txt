@@ -77,7 +77,7 @@ langchain-community==0.4.1
 langchain-core==1.2.31
 langchain-experimental==0.4.1
 langchain-milvus==0.3.3
-langchain-ollama==1.1.0
+langchain-openai==1.1.14
 langchain-text-splitters==1.1.2
 langsmith==0.7.31
 lightrag-hku==1.4.14
@@ -96,7 +96,7 @@ neo4j==6.1.0
 networkx==3.6.1
 nltk==3.9.4
 numpy==2.4.4
-ollama==0.6.1
+openai==2.31.0
 orjson==3.11.8
 packaging==25.0
 pamqp==3.3.0

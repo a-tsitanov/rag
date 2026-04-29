@@ -81,13 +81,18 @@ async def create_rag(
 
     Path(wd).mkdir(parents=True, exist_ok=True)
 
-    # ── Ollama backend ────────────────────────────────────────────────
-    from lightrag.llm.ollama import ollama_embed, ollama_model_complete
+    # ── OpenAI-compatible backend (LiteLLM proxy) ─────────────────────
+    from lightrag.llm.openai import openai_complete, openai_embed
 
-    _ollama_embed_raw = getattr(ollama_embed, "func", ollama_embed)
+    _openai_embed_raw = getattr(openai_embed, "func", openai_embed)
 
     async def _embed(texts: list[str]) -> list:
-        return await _ollama_embed_raw(texts, embed_model=embed_name)
+        return await _openai_embed_raw(
+            texts,
+            model=embed_name,
+            base_url=settings.litellm.base_url,
+            api_key=settings.litellm.api_key,
+        )
 
     embedding_func = EmbeddingFunc(
         embedding_dim=embed_dim,
@@ -97,7 +102,7 @@ async def create_rag(
 
     rag = LightRAG(
         working_dir=wd,
-        llm_model_func=ollama_model_complete,
+        llm_model_func=openai_complete,
         llm_model_name=llm_name,
         embedding_func=embedding_func,
         graph_storage=graph_kind,
@@ -110,11 +115,13 @@ async def create_rag(
         max_parallel_insert=settings.lightrag.max_parallel_insert,
         entity_extract_max_gleaning=settings.lightrag.entity_extract_max_gleaning,
         llm_model_kwargs={
-            "host": settings.ollama.host,
-            # Ollama дефолт num_ctx=2048 режет LightRAG entity-extraction
-            # prompt (system_prompt + chunk часто > 2k токенов).
-            # options передаются через ollama.AsyncClient.generate(...).
-            "options": {"num_ctx": settings.lightrag.num_ctx},
+            "base_url": settings.litellm.base_url,
+            "api_key": settings.litellm.api_key,
+            # Для downstream-Ollama LiteLLM пробрасывает extra_body.options
+            # как ollama options.  Дефолтный num_ctx=2048 режет LightRAG
+            # entity-extraction prompt (system_prompt + chunk > 2k tok).
+            # Не-Ollama backends значение игнорируют.
+            "extra_body": {"options": {"num_ctx": settings.lightrag.num_ctx}},
         },
     )
 

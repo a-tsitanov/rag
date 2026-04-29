@@ -50,7 +50,7 @@ async def search(
             return await agentic_search(
                 searcher=searcher,
                 query=req.query,
-                ollama_client=llm_client,
+                llm_client=llm_client,
                 max_rounds=req.agentic_max_rounds,
                 mode=req.mode,  # type: ignore[arg-type]
                 department=req.department,

@@ -2,12 +2,12 @@
 
 Each sub-class owns its own ``env_prefix`` and reads the same ``.env``
 file.  Root :class:`Settings` composes them as fields, so consumers see
-``settings.milvus.host``, ``settings.ollama.timeout_s`` etc.
+``settings.milvus.host``, ``settings.litellm.timeout_s`` etc.
 
 Env-var naming
 --------------
 Every env var follows ``<PREFIX>_<FIELD>``, e.g. ``MILVUS_HOST``,
-``POSTGRES_CONNECT_TIMEOUT_S``, ``OLLAMA_EMBEDDING_MODEL``.
+``POSTGRES_CONNECT_TIMEOUT_S``, ``LITELLM_EMBEDDING_MODEL``.
 """
 
 from __future__ import annotations
@@ -96,14 +96,20 @@ class PostgresSettings(BaseSettings):
         )
 
 
-class OllamaSettings(BaseSettings):
-    model_config = _sub("OLLAMA_")
+class LiteLLMSettings(BaseSettings):
+    """LiteLLM proxy is OpenAI-API-compatible — клиенты ходят через
+    ``openai.AsyncOpenAI(base_url=..., api_key=...)``.  Имена моделей —
+    те же алиасы, что прописаны в LiteLLM ``config.yaml``.
+    """
 
-    host: str = "http://localhost:11434"
-    model: str = "llama3.1:8b"
+    model_config = _sub("LITELLM_")
+
+    base_url: str = "http://localhost:4000"
+    api_key: str = "sk-litellm-stub"
+    model: str = "qwen2.5:3b"
     embedding_model: str = "nomic-embed-text"
-    embedding_dim: int = 1024
-    # HTTP-level timeout на каждый запрос в Ollama.  Должен быть **не
+    embedding_dim: int = 768
+    # HTTP-level timeout на каждый запрос в LiteLLM.  Должен быть **не
     # меньше** ``LIGHTRAG_LLM_TIMEOUT_S`` — иначе httpx оборвёт соединение
     # до того, как LightRAG сам решит таймаутить.
     timeout_s: float = 600.0
@@ -139,7 +145,7 @@ class LightRAGSettings(BaseSettings):
     """Knobs for LightRAG itself.
 
     Empty strings / ``0`` for model/dim mean "fall back to the shared
-    :class:`OllamaSettings` values" — resolved via
+    :class:`LiteLLMSettings` values" — resolved via
     :meth:`Settings.effective_lightrag_llm_model` etc.
     """
 
@@ -159,15 +165,16 @@ class LightRAGSettings(BaseSettings):
     embedding_timeout_s: int = 120
     # Concurrency cap для LLM-вызовов.  LightRAG-дефолт=4; для слабых
     # локальных машин ставь 1-2, иначе параллельные запросы забивают
-    # очередь в Ollama.
+    # очередь у downstream-LLM (через LiteLLM).
     max_async: int = 2
-    # Контекстное окно модели в токенах. Прокидывается в Ollama через
-    # options.num_ctx — дефолт Ollama = 2048 режет entity-extraction
-    # prompt (chunk + system prompt ≈ 2000 ток. → 400 "input length
-    # exceeds context length"). Держи ≥ 8192 для нормальной работы
-    # LightRAG; для больших документов поднимай до 16384-32768.
+    # Контекстное окно модели в токенах. Прокидывается в downstream-Ollama
+    # через ``extra_body.options.num_ctx`` (LiteLLM пробрасывает в Ollama
+    # как `options.num_ctx`).  Дефолт Ollama = 2048 режет entity-extraction
+    # prompt LightRAG (chunk + system prompt ≈ 2000 ток. → "input length
+    # exceeds context length"). Держи ≥ 8192; для больших документов
+    # 16384-32768.  Для не-Ollama backends LiteLLM значение игнорирует.
     num_ctx: int = 16384
-    # Параллельные эмбеддинг-вызовы. LightRAG-дефолт 8. Ollama на CPU
+    # Параллельные эмбеддинг-вызовы. LightRAG-дефолт 8. На CPU
     # захлебнётся >4, на GPU смело 16-32.
     embedding_func_max_async: int = 8
     # Размер батча в одном embed-вызове. Дефолт 10; для больших
@@ -214,7 +221,7 @@ class Settings(BaseSettings):
     milvus: MilvusSettings = Field(default_factory=MilvusSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
-    ollama: OllamaSettings = Field(default_factory=OllamaSettings)
+    litellm: LiteLLMSettings = Field(default_factory=LiteLLMSettings)
     rabbitmq: RabbitMQSettings = Field(default_factory=RabbitMQSettings)
     taskiq: TaskiqSettings = Field(default_factory=TaskiqSettings)
     lightrag: LightRAGSettings = Field(default_factory=LightRAGSettings)
@@ -224,20 +231,20 @@ class Settings(BaseSettings):
 
     @property
     def effective_lightrag_llm_model(self) -> str:
-        return self.lightrag.llm_model or self.ollama.model
+        return self.lightrag.llm_model or self.litellm.model
 
     @property
     def effective_lightrag_embedding_model(self) -> str:
-        return self.lightrag.embedding_model or self.ollama.embedding_model
+        return self.lightrag.embedding_model or self.litellm.embedding_model
 
     @property
     def effective_lightrag_embedding_dim(self) -> int:
-        return self.lightrag.embedding_dim or self.ollama.embedding_dim
+        return self.lightrag.embedding_dim or self.litellm.embedding_dim
 
     @property
     def effective_llm_model(self) -> str:
         """Model name for direct LLM calls (judge, decomposer, summaries)."""
-        return self.ollama.model
+        return self.litellm.model
 
 
 settings = Settings()

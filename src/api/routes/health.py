@@ -6,11 +6,11 @@ import asyncio
 from typing import Literal
 
 import aio_pika
-import ollama
 import psycopg
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter
 from lightrag import LightRAG
+from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from src.config import Settings
@@ -81,12 +81,14 @@ async def _check_postgres(
         return ServiceHealth(status="down", detail=str(exc))
 
 
-async def _check_ollama(
-    oc: ollama.AsyncClient, s: Settings,
+async def _check_litellm(
+    oc: AsyncOpenAI, s: Settings,
 ) -> ServiceHealth:
     try:
-        resp = await asyncio.wait_for(oc.list(), timeout=min(s.ollama.timeout_s, 5.0))
-        models = [m.model for m in (resp.models or [])]
+        resp = await asyncio.wait_for(
+            oc.models.list(), timeout=min(s.litellm.timeout_s, 5.0),
+        )
+        models = [m.id for m in (resp.data or [])]
         return ServiceHealth(status="up", detail=f"{len(models)} models")
     except Exception as exc:
         return ServiceHealth(status="down", detail=str(exc))
@@ -113,7 +115,7 @@ async def health(
     settings: FromDishka[Settings],
     neo4j: FromDishka[AsyncNeo4jClient],
     pg: FromDishka[psycopg.AsyncConnection],
-    ollama_client: FromDishka[ollama.AsyncClient],
+    openai_client: FromDishka[AsyncOpenAI],
     rag: FromDishka[LightRAG],
 ) -> HealthResponse:
     rmq, m, n, p, o, rg = await asyncio.gather(
@@ -121,13 +123,13 @@ async def health(
         _check_milvus(settings),
         _check_neo4j(neo4j),
         _check_postgres(pg, settings),
-        _check_ollama(ollama_client, settings),
+        _check_litellm(openai_client, settings),
         _check_lightrag(rag),
     )
 
     services = {
         "rabbitmq": rmq, "milvus": m, "neo4j": n,
-        "postgres": p, "ollama": o, "lightrag": rg,
+        "postgres": p, "litellm": o, "lightrag": rg,
     }
 
     down = [s for s in services.values() if s.status == "down"]

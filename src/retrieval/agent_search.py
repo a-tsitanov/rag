@@ -193,7 +193,7 @@ async def _judge_context(
 async def agentic_search(
     searcher: HybridSearcher,
     query: str,
-    ollama_client: LLMClient,
+    llm_client: LLMClient,
     *,
     max_rounds: int = 3,
     mode: SearchMode = "hybrid",
@@ -284,7 +284,7 @@ async def agentic_search(
 
         # c. judge (LLM call) — sees both chunks and graph data
         judgment = await _judge_context(
-            ollama_client, query, all_sources, all_graph_data,
+            llm_client, query, all_sources, all_graph_data,
         )
 
         logger.info(

@@ -3,7 +3,8 @@
 Topology
 --------
 * ``CommonProvider`` — infra shared by API and worker: Milvus vectorstore
-  (langchain), Neo4j, Postgres, Ollama embeddings, reranker.
+  (langchain), Neo4j, Postgres, OpenAI-compatible embeddings (LiteLLM),
+  reranker.
 * ``ApiProvider``    — LightRAG + ``HybridSearcher`` for the HTTP service.
 * ``WorkerProvider`` — LightRAG + ``AsyncDocumentWorker`` for ingestion.
 """
@@ -12,14 +13,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
 
-import ollama
 import psycopg
 from dishka import Provider, Scope, provide
 from langchain_core.embeddings import Embeddings
 from langchain_milvus import Milvus
 from lightrag import LightRAG
+from openai import AsyncOpenAI
 from pymilvus import MilvusClient, connections as _pymilvus_connections
 
 
@@ -135,14 +135,20 @@ class CommonProvider(Provider):
     def settings(self) -> Settings:
         return settings
 
-    # ── embeddings (langchain — Ollama) ──────────────────────────────
+    # ── embeddings (langchain — OpenAI-compatible / LiteLLM) ─────────
 
     @provide
     def embeddings(self, s: Settings) -> Embeddings:
-        from langchain_ollama import OllamaEmbeddings
-        return OllamaEmbeddings(
-            model=s.ollama.embedding_model,
-            base_url=s.ollama.host,
+        from langchain_openai import OpenAIEmbeddings
+        return OpenAIEmbeddings(
+            model=s.litellm.embedding_model,
+            base_url=s.litellm.base_url,
+            api_key=s.litellm.api_key,
+            # tiktoken пытается резолвить токенайзер по имени модели и
+            # падает на не-OpenAI алиасах (e.g. "nomic-embed-text").
+            # Отключаем — embed-сервер сам считает токены.
+            tiktoken_enabled=False,
+            check_embedding_ctx_length=False,
         )
 
     # ── vectorstore (langchain-milvus) ───────────────────────────────
@@ -219,21 +225,27 @@ class CommonProvider(Provider):
             await pg.execute(_UPSERT_DOC, payload)
         return _update
 
-    # ── LLM client (Ollama) ──────────────────────────────────────────
+    # ── LLM client (OpenAI-compatible / LiteLLM) ─────────────────────
 
     @provide
     def llm_client(self, s: Settings) -> LLMClient:
         return LLMClient(
-            provider="ollama",
-            _client=ollama.AsyncClient(
-                host=s.ollama.host, timeout=s.ollama.timeout_s,
+            provider="litellm",
+            _client=AsyncOpenAI(
+                base_url=s.litellm.base_url,
+                api_key=s.litellm.api_key,
+                timeout=s.litellm.timeout_s,
             ),
         )
 
-    # Keep raw ollama client for health checks
+    # Raw OpenAI client for health checks (models.list)
     @provide
-    def ollama_client(self, s: Settings) -> ollama.AsyncClient:
-        return ollama.AsyncClient(host=s.ollama.host, timeout=s.ollama.timeout_s)
+    def openai_client(self, s: Settings) -> AsyncOpenAI:
+        return AsyncOpenAI(
+            base_url=s.litellm.base_url,
+            api_key=s.litellm.api_key,
+            timeout=s.litellm.timeout_s,
+        )
 
     @provide
     def reranker_fn(self) -> RerankerFn:
