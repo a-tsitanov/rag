@@ -83,6 +83,7 @@ from src.config import Settings, settings
 from src.ingestion.chunker import SemanticChunker
 from src.ingestion.worker import (
     AsyncDocumentWorker,
+    LightRAGCustomKGInserter,
     LightRAGInserter,
     PGStatusUpdater,
 )
@@ -314,6 +315,16 @@ class WorkerProvider(Provider):
         return _insert
 
     @provide
+    def lightrag_custom_kg_inserter(
+        self, rag: LightRAG,
+    ) -> LightRAGCustomKGInserter:
+        """Bridge to ``rag.ainsert_custom_kg`` for Stage-C identifier
+        injection (see ``src/ingestion/identifiers.py``)."""
+        async def _insert_custom_kg(payload: dict) -> None:
+            await rag.ainsert_custom_kg(payload)
+        return _insert_custom_kg
+
+    @provide
     def chunker(self, emb: Embeddings, s: Settings) -> SemanticChunker:
         return SemanticChunker(
             embeddings=emb,
@@ -326,6 +337,7 @@ class WorkerProvider(Provider):
         self,
         vs: Milvus,
         inserter: LightRAGInserter,
+        custom_kg_inserter: LightRAGCustomKGInserter,
         status: PGStatusUpdater,
         chunker: SemanticChunker,
         llm: LLMClient,
@@ -335,6 +347,7 @@ class WorkerProvider(Provider):
         return AsyncDocumentWorker(
             vectorstore=vs,
             lightrag_inserter=inserter,
+            lightrag_custom_kg_inserter=custom_kg_inserter,
             pg_status_updater=status,
             chunker=chunker,
             llm_client=llm,

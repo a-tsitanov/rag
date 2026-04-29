@@ -20,6 +20,150 @@ from src.config import settings
 logger = logging.getLogger(__name__)
 
 
+# ── domain-specific entity types & prompt customization ───────────────
+#
+# LightRAG defaults (lightrag/constants.py:DEFAULT_ENTITY_TYPES) are
+# Person/Organization/Location/Event/Concept/...  Identifiers (phones,
+# INN, OGRN, contract numbers, addresses, amounts, dates) fall through
+# to "Other" or get dropped.  The list below is tuned for Russian
+# business documents.
+BUSINESS_ENTITY_TYPES: list[str] = [
+    "Person",
+    "Organization",
+    "Location",
+    "PhoneNumber",
+    "Email",
+    "ContractNumber",
+    "OrderNumber",
+    "InvoiceNumber",
+    "PostalAddress",
+    "INN",
+    "OGRN",
+    "BIC",
+    "BankAccount",
+    "DocumentDate",
+    "Amount",
+    "Concept",
+    "Method",
+    "Event",
+]
+
+
+# Extra rules appended to the default extraction system prompt (rule №9).
+# Teaches the LLM (a) to extract identifiers verbatim when they appear
+# raw in text, and (b) to switch to canonical form when an augment-block
+# "Канонические идентификаторы" is supplied by the ingestion pipeline
+# (see Stage C of the retrieval-quality plan).
+_IDENTIFIER_RULES = """
+
+9.  **Identifier Extraction (Critical):**
+    *   Entity types that represent identifiers — `PhoneNumber`, `Email`,
+        `ContractNumber`, `OrderNumber`, `InvoiceNumber`, `PostalAddress`,
+        `INN`, `OGRN`, `BIC`, `BankAccount`, `DocumentDate`, `Amount` —
+        must be extracted whenever they appear, even if they look trivial.
+    *   **Canonical-form rule:** if the input contains a section titled
+        "Канонические идентификаторы" (canonical identifiers block), use
+        those exact strings as `entity_name` for matching identifiers.
+        Otherwise extract the identifier **verbatim** as it appears in the
+        source — preserve all separators (`-`, `/`, `.`, spaces,
+        parentheses, `№`).  Do NOT normalize, abbreviate, or reformat.
+        *   Wrong: `+7 (495) 123-45-67` → `74951234567` (when no canonical
+            block is given).
+        *   Right: `+7 (495) 123-45-67` → `+7 (495) 123-45-67`.
+    *   `entity_description` for identifiers must include the role/owner
+        and the original written form when a canonical was used.  Example:
+        `entity_description = "Контактный телефон ООО Ромашка по договору
+        №12-345/АВ; в тексте: '+7 (495) 123-45-67'"`.
+    *   Always create a relationship from the identifier-owning entity to
+        the identifier itself (e.g. `Person → PhoneNumber`,
+        `Organization → INN`, `ContractNumber → DocumentDate`).
+"""
+
+
+# One Russian-domain few-shot replaces the three default story-style
+# examples.  Goal: teach the model the identifier-extraction pattern,
+# including how to use a "Канонические идентификаторы" block when it is
+# supplied.  `{tuple_delimiter}` and `{completion_delimiter}` are
+# placeholders — LightRAG's `.format()` substitutes them at runtime
+# (see lightrag/operate.py).
+_BUSINESS_DOC_EXAMPLE = """<Entity_types>
+["Person","Organization","Location","PhoneNumber","Email","ContractNumber","PostalAddress","INN","Amount","DocumentDate"]
+
+<Input Text>
+```
+Договор поставки №ДП-2024/178-К от 15.03.2024 заключён между ООО «Северные технологии» (ИНН 7707083893, юр. адрес: 127015, г. Москва, ул. Бутырская, д. 76, стр. 1) и АО «Промсервис».
+
+Контактное лицо: Иванов Иван Петрович, телефон +7 (495) 234-56-78, доб. 412, e-mail: i.ivanov@sevtech.ru. Сумма договора: 4 250 000,00 руб.
+
+---
+Канонические идентификаторы (используй ИМЕННО ТАКУЮ форму в entity_name):
+- PhoneNumber: +74952345678
+- Email: i.ivanov@sevtech.ru
+- INN: 7707083893
+- ContractNumber: ДП-2024/178-К
+- DocumentDate: 2024-03-15
+- Amount: 4250000.00 RUB
+- PostalAddress: 127015, москва, ул бутырская, 76 стр 1
+```
+
+<Output>
+entity{tuple_delimiter}ДП-2024/178-К{tuple_delimiter}ContractNumber{tuple_delimiter}Номер договора поставки между ООО «Северные технологии» и АО «Промсервис», заключённого 15.03.2024.
+entity{tuple_delimiter}2024-03-15{tuple_delimiter}DocumentDate{tuple_delimiter}Дата заключения договора поставки №ДП-2024/178-К; в тексте: «15.03.2024».
+entity{tuple_delimiter}ООО «Северные технологии»{tuple_delimiter}Organization{tuple_delimiter}Юридическое лицо — поставщик по договору №ДП-2024/178-К.
+entity{tuple_delimiter}АО «Промсервис»{tuple_delimiter}Organization{tuple_delimiter}Юридическое лицо — покупатель по договору №ДП-2024/178-К.
+entity{tuple_delimiter}7707083893{tuple_delimiter}INN{tuple_delimiter}ИНН ООО «Северные технологии».
+entity{tuple_delimiter}127015, москва, ул бутырская, 76 стр 1{tuple_delimiter}PostalAddress{tuple_delimiter}Юридический адрес ООО «Северные технологии»; в тексте: «127015, г. Москва, ул. Бутырская, д. 76, стр. 1».
+entity{tuple_delimiter}Иванов Иван Петрович{tuple_delimiter}Person{tuple_delimiter}Контактное лицо со стороны ООО «Северные технологии» по договору №ДП-2024/178-К.
+entity{tuple_delimiter}+74952345678{tuple_delimiter}PhoneNumber{tuple_delimiter}Контактный телефон Иванова И.П.; в тексте: «+7 (495) 234-56-78, доб. 412».
+entity{tuple_delimiter}i.ivanov@sevtech.ru{tuple_delimiter}Email{tuple_delimiter}Рабочий e-mail Иванова И.П. в ООО «Северные технологии».
+entity{tuple_delimiter}4250000.00 RUB{tuple_delimiter}Amount{tuple_delimiter}Сумма договора поставки №ДП-2024/178-К; в тексте: «4 250 000,00 руб.».
+relation{tuple_delimiter}ООО «Северные технологии»{tuple_delimiter}АО «Промсервис»{tuple_delimiter}поставка, договор{tuple_delimiter}Организации связаны договором поставки №ДП-2024/178-К от 15.03.2024.
+relation{tuple_delimiter}ООО «Северные технологии»{tuple_delimiter}ДП-2024/178-К{tuple_delimiter}участник договора{tuple_delimiter}ООО «Северные технологии» — поставщик по этому договору.
+relation{tuple_delimiter}АО «Промсервис»{tuple_delimiter}ДП-2024/178-К{tuple_delimiter}участник договора{tuple_delimiter}АО «Промсервис» — покупатель по этому договору.
+relation{tuple_delimiter}ДП-2024/178-К{tuple_delimiter}2024-03-15{tuple_delimiter}дата заключения{tuple_delimiter}Договор заключён 15 марта 2024 года.
+relation{tuple_delimiter}ООО «Северные технологии»{tuple_delimiter}7707083893{tuple_delimiter}реквизит, идентификация{tuple_delimiter}ИНН принадлежит ООО «Северные технологии».
+relation{tuple_delimiter}ООО «Северные технологии»{tuple_delimiter}127015, москва, ул бутырская, 76 стр 1{tuple_delimiter}юридический адрес{tuple_delimiter}Адрес регистрации ООО «Северные технологии».
+relation{tuple_delimiter}Иванов Иван Петрович{tuple_delimiter}ООО «Северные технологии»{tuple_delimiter}сотрудник, контакт{tuple_delimiter}Иванов И.П. — контактное лицо ООО «Северные технологии» по данному договору.
+relation{tuple_delimiter}Иванов Иван Петрович{tuple_delimiter}+74952345678{tuple_delimiter}контакт{tuple_delimiter}Указанный телефон принадлежит Иванову И.П.
+relation{tuple_delimiter}Иванов Иван Петрович{tuple_delimiter}i.ivanov@sevtech.ru{tuple_delimiter}контакт{tuple_delimiter}Указанный e-mail принадлежит Иванову И.П.
+relation{tuple_delimiter}ДП-2024/178-К{tuple_delimiter}4250000.00 RUB{tuple_delimiter}сумма договора{tuple_delimiter}Сумма обязательств по договору поставки.
+{completion_delimiter}
+
+"""
+
+
+_PROMPTS_PATCHED = False
+
+
+def _patch_lightrag_prompts() -> None:
+    """Mutate ``lightrag.prompt.PROMPTS`` with project-specific overrides.
+
+    Idempotent — safe to call multiple times (e.g. across multiple
+    ``create_rag`` invocations in tests).  Must run **before**
+    ``LightRAG(...)`` is constructed since LightRAG snapshots prompt
+    references at init time.
+    """
+    global _PROMPTS_PATCHED
+    if _PROMPTS_PATCHED:
+        return
+
+    from lightrag import prompt as lr_prompt
+
+    base_system = lr_prompt.PROMPTS["entity_extraction_system_prompt"]
+    if "Identifier Extraction (Critical)" not in base_system:
+        lr_prompt.PROMPTS["entity_extraction_system_prompt"] = base_system.replace(
+            "\n---Examples---\n{examples}",
+            _IDENTIFIER_RULES + "\n---Examples---\n{examples}",
+        )
+
+    lr_prompt.PROMPTS["entity_extraction_examples"] = [_BUSINESS_DOC_EXAMPLE]
+
+    _PROMPTS_PATCHED = True
+    logger.info(
+        "LightRAG prompts patched  identifier_rules=on  few_shot=business_doc"
+    )
+
+
 # ── env-var bridges for LightRAG storage backends ────────────────────
 
 
@@ -71,6 +215,7 @@ async def create_rag(
 
     _export_neo4j_env()
     _export_milvus_env()
+    _patch_lightrag_prompts()
 
     wd = working_dir or settings.lightrag.working_dir
     llm_name = llm_model_name or settings.effective_lightrag_llm_model
@@ -122,6 +267,10 @@ async def create_rag(
             # entity-extraction prompt (system_prompt + chunk > 2k tok).
             # Не-Ollama backends значение игнорируют.
             "extra_body": {"options": {"num_ctx": settings.lightrag.num_ctx}},
+        },
+        addon_params={
+            "language": "Russian",
+            "entity_types": BUSINESS_ENTITY_TYPES,
         },
     )
 

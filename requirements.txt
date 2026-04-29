@@ -41,6 +41,7 @@ click==8.3.2
 configparser==7.2.0
 cryptography==46.0.7
 dataclasses-json==0.6.7
+dateparser==1.4.0
 dishka==1.9.1
 distro==1.9.0
 docker==7.1.0
@@ -103,9 +104,15 @@ pamqp==3.3.0
 pandas==2.3.3
 pdfminer.six==20251230
 pdfplumber==0.11.9
+phonenumbers==9.0.29
 pillow==12.2.0
 pipmaster==1.1.8
 pluggy==1.6.0
+# Optional: libpostal Python bindings for address normalization.
+# Requires system package `libpostal-dev` (Linux) / `brew install libpostal`
+# (macOS) before `pip install`. The src/ingestion/identifiers.py module
+# imports it conditionally and falls back to rule-based when unavailable.
+postal==1.1.11
 propcache==0.4.1
 proto-plus==1.27.2
 protobuf==7.34.1
@@ -162,6 +169,7 @@ typing_extensions==4.15.0
 typing-inspect==0.9.0
 typing-inspection==0.4.2
 tzdata==2026.1
+tzlocal==5.3.1
 ujson==5.12.0
 urllib3==2.6.3
 uuid_utils==0.14.1

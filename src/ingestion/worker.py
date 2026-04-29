@@ -26,6 +26,11 @@ from loguru import logger
 
 from src.config import settings
 from src.ingestion.chunker import Chunk, SemanticChunker
+from src.ingestion.identifiers import (
+    build_augment_block,
+    build_custom_kg_payload,
+    extract_identifiers,
+)
 from src.ingestion.parser import DocumentParser, ParsedDocument
 from src.llm_client import LLMClient
 from src.storage.sparse_encoder import SparseEncoder
@@ -67,6 +72,7 @@ class PGStatusPayload:
 # ── type aliases ──────────────────────────────────────────────────────
 
 LightRAGInserter = Callable[[str], Coroutine[Any, Any, None]]
+LightRAGCustomKGInserter = Callable[[dict], Coroutine[Any, Any, None]]
 PGStatusUpdater = Callable[..., Coroutine[Any, Any, None]]
 
 # Vectorstore protocol — любой объект с add_documents (langchain Milvus,
@@ -98,11 +104,13 @@ class AsyncDocumentWorker:
         chunker: SemanticChunker | None = None,
         embeddings: Embeddings | None = None,
         sparse_encoder: SparseEncoder | None = None,
+        lightrag_custom_kg_inserter: LightRAGCustomKGInserter | None = None,
     ):
         self._parser = parser or DocumentParser()
         self._chunker = chunker
         self._vectorstore = vectorstore
         self._lightrag_insert = lightrag_inserter
+        self._lightrag_custom_kg = lightrag_custom_kg_inserter
         self._pg_status = pg_status_updater
         self._llm = llm_client
         self._embeddings = embeddings
@@ -259,8 +267,48 @@ class AsyncDocumentWorker:
             timings.append(StepTiming("vectorstore", self._now() - t0))
 
             # 4. LightRAG entity extraction (свой pipeline)
+            #
+            # Two-stage handoff (see retrieval-quality plan, Stage C):
+            #   a. extract_identifiers — deterministic regex/lib pass
+            #      yields canonical forms (E.164 phones, ISO dates, INN
+            #      with valid checksum, ...).
+            #   b. ainsert_custom_kg — guarantees a Neo4j node exists
+            #      with the canonical name BEFORE the LLM extraction
+            #      runs over the same text.  Subsequent LLM-extracted
+            #      relationships then attach to the canonical node.
+            #   c. text is augmented with a `Канонические идентификаторы`
+            #      block so the LLM (cued by Stage A's system prompt)
+            #      uses canonical forms when building relations.
+            #
+            # The custom-KG inserter is optional — when not wired
+            # (older configs, tests with simpler fakes) we fall back to
+            # plain ainsert(text) and graph-fragmentation persists.
             t0 = self._now()
-            await self._lightrag_insert(doc.text)
+            text_for_rag = doc.text
+            if self._lightrag_custom_kg is not None:
+                idents = extract_identifiers(doc.text)
+                if idents:
+                    payload = build_custom_kg_payload(
+                        idents,
+                        doc_id=doc_id,
+                        file_path=str(path),
+                        text=doc.text,
+                    )
+                    try:
+                        await self._lightrag_custom_kg(payload)
+                    except Exception as exc:
+                        logger.warning(
+                            "ainsert_custom_kg failed (continuing with "
+                            "plain ainsert)  doc_id={doc_id} err={err}",
+                            doc_id=doc_id, err=exc,
+                        )
+                    text_for_rag = doc.text + build_augment_block(idents)
+                    logger.info(
+                        "identifiers extracted  doc_id={doc_id} "
+                        "count={n}",
+                        doc_id=doc_id, n=len(idents),
+                    )
+            await self._lightrag_insert(text_for_rag)
             timings.append(StepTiming("lightrag", self._now() - t0))
 
             # 5. PG status → completed (+ summary if generated)
