@@ -239,7 +239,11 @@ def _extract_contracts(text: str) -> list[NormalizedIdentifier]:
 # ── DocumentDate ─────────────────────────────────────────────────────
 
 _DATE_DMY_RE = re.compile(
-    r"(?<!\d)(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4})(?!\d)"
+    # Require a 4-digit year — filters out software-version triplets
+    # like ``1.4.10`` (would otherwise parse as ``2010-04-01``).  Two-
+    # digit years are rare in formal Russian business documents; the
+    # eval golden set assumes 4-digit only.
+    r"(?<!\d)(\d{1,2}[./\-]\d{1,2}[./\-]\d{4})(?!\d)"
 )
 _DATE_ISO_RE = re.compile(
     r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)"
@@ -424,17 +428,32 @@ def _normalize_address(raw: str) -> str:
         return _normalize_address_rule(raw)
 
 
+_ADDR_TERMINATORS: tuple[str, ...] = ("\n", ")", " и ", "; ", " — ")
+
+
+def _truncate_address_window(window: str) -> str:
+    """Stop at the earliest natural address terminator.
+
+    Without this the 200-char window past the postcode swallows trailing
+    clauses (``...д. 76, стр. 1) и АО «Промсервис»``) and pollutes the
+    canonical.  Terminators chosen empirically from real Russian
+    contracts.
+    """
+    cuts = [window.find(t) for t in _ADDR_TERMINATORS]
+    cuts = [c for c in cuts if c >= 0]
+    if cuts:
+        return window[: min(cuts)]
+    return window
+
+
 def _extract_addresses(text: str) -> list[NormalizedIdentifier]:
     out: list[NormalizedIdentifier] = []
     seen_spans: set[tuple[int, int]] = set()
     for m in _POSTAL_CODE_RE.finditer(text):
         start = m.start()
         end = min(len(text), m.end() + _ADDR_WINDOW)
-        window = text[start:end]
-        nl = window.find("\n")
-        if nl >= 0:
-            window = window[:nl]
-            end = start + nl
+        window = _truncate_address_window(text[start:end])
+        end = start + len(window)
         if not _ADDR_MARKER_RE.search(window):
             continue
         span = (start, end)

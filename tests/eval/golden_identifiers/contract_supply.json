@@ -1,0 +1,15 @@
+{
+  "name": "contract_supply",
+  "description": "Typical Russian supply contract — # contract, date, parties with INN/OGRN/address, contact person with phone/email, amount.",
+  "text": "Договор поставки № ДП-2024/178-К от 15.03.2024 заключён между ООО «Северные технологии» (ИНН 7707083893, ОГРН 1027700132195, юр. адрес: 127015, г. Москва, ул. Бутырская, д. 76, стр. 1) и АО «Промсервис».\nКонтактное лицо: Иванов Иван Петрович, телефон +7 (495) 234-56-78, e-mail i.ivanov@sevtech.ru. Сумма договора: 4 250 000,00 руб.",
+  "expected": {
+    "ContractNumber": ["ДП-2024/178-К"],
+    "DocumentDate": ["2024-03-15"],
+    "INN": ["7707083893"],
+    "OGRN": ["1027700132195"],
+    "PostalAddress": ["127015"],
+    "PhoneNumber": ["+74952345678"],
+    "Email": ["i.ivanov@sevtech.ru"],
+    "Amount": ["4250000.00 RUB"]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "dates_variety",
+  "description": "Various date formats: dotted, slash, dashed, ISO, verbal Russian.",
+  "text": "Договор подписан 15.03.2024. Срок исполнения — до 31/12/2024. Акт сдан-приёмки от 1 апреля 2024 г. Оплата произведена 2024-05-20.",
+  "expected": {
+    "DocumentDate": [
+      "2024-03-15",
+      "2024-12-31",
+      "2024-04-01",
+      "2024-05-20"
+    ]
+  }
+}

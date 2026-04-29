@@ -1,0 +1,11 @@
+{
+  "name": "sole_proprietor",
+  "description": "Individual entrepreneur (ИП) — 12-digit INN and 15-digit ОГРНИП.",
+  "text": "Исполнитель: ИП Петров Пётр Петрович, ИНН 500400123402, ОГРНИП 304500116000157. Контакты: тел. +7-921-123-45-67, e-mail p.petrov@mail.ru.",
+  "expected": {
+    "INN": ["500400123402"],
+    "OGRN": ["304500116000157"],
+    "PhoneNumber": ["+79211234567"],
+    "Email": ["p.petrov@mail.ru"]
+  }
+}

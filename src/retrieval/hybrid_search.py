@@ -171,7 +171,19 @@ class HybridSearcher:
         max_total_tokens: int = 30000,
         response_type: str = "Multiple Paragraphs",
         include_references: bool = False,
+        hl_keywords: list[str] | None = None,
+        ll_keywords: list[str] | None = None,
     ) -> str:
+        """Run LightRAG ``aquery`` with optional keyword hints.
+
+        ``hl_keywords`` / ``ll_keywords`` are LightRAG's native hooks for
+        priming the high-level (relation-driven) and low-level
+        (entity-driven) retrieval channels — bypassing the LLM
+        keyword-extraction step.  Stage F of the retrieval-quality plan
+        feeds them with entity names accumulated across agentic rounds
+        so the final synthesis builds on what previous probes already
+        found.
+        """
         from lightrag import QueryParam
 
         param = QueryParam(
@@ -183,6 +195,8 @@ class HybridSearcher:
             max_total_tokens=max_total_tokens,
             response_type=response_type,
             include_references=include_references,
+            hl_keywords=list(hl_keywords) if hl_keywords else [],
+            ll_keywords=list(ll_keywords) if ll_keywords else [],
         )
         try:
             return await self._rag.aquery(query, param=param)

@@ -62,6 +62,43 @@ class SourceCitation(BaseModel):
     doc_type: str = ""
 
 
+class AgenticRoundStat(BaseModel):
+    """Per-round telemetry from ``agentic_search`` (Phase 4).
+
+    Lets UI / диагностика увидеть «что принёс каждый раунд» без чтения
+    серверных логов — проще настраивать ``agentic_max_rounds`` и
+    оценивать пользу follow-up'ов.
+    """
+
+    round: int = Field(..., description="1-based round number.")
+    query: str = Field(
+        ..., description="Запрос, использованный в этом раунде."
+    )
+    new_sources: int = Field(
+        0, description="Сколько НОВЫХ чанков добавил раунд (после дедупа)."
+    )
+    new_entities: int = Field(
+        0, description="Сколько НОВЫХ KG-сущностей добавил раунд."
+    )
+    new_relations: int = Field(
+        0, description="Сколько НОВЫХ KG-отношений добавил раунд."
+    )
+    sufficient: bool | None = Field(
+        None,
+        description=(
+            "Вердикт LLM-судьи: достаточно ли контекста. "
+            "null когда судья не вызывался (early-exit на 'no new info')."
+        ),
+    )
+    judge_reason: str = Field(
+        "",
+        description=(
+            "Причина от судьи или 'no new info' для skipped-судьи "
+            "(Stage G)."
+        ),
+    )
+
+
 class SearchResponse(BaseModel):
     query: str
     answer: str
@@ -76,4 +113,11 @@ class SearchResponse(BaseModel):
     )
     follow_up_queries: list[str] | None = Field(
         None, description="Follow-up запросы от LLM judge (agentic mode).",
+    )
+    agentic_round_stats: list[AgenticRoundStat] | None = Field(
+        None,
+        description=(
+            "Per-round телеметрия agentic search (новые источники / "
+            "сущности / связи + вердикт судьи). null для не-agentic."
+        ),
     )

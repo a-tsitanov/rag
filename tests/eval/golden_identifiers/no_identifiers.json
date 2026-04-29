@@ -1,0 +1,6 @@
+{
+  "name": "no_identifiers",
+  "description": "Negative case — plain prose, no identifiers. Validates precision: extractor must NOT fire false positives on dates that aren't dates, dashed alphanumerics that aren't contracts, etc.",
+  "text": "Эта документация описывает архитектуру системы. Все компоненты взаимодействуют через REST-API и общую очередь. Производительность системы соответствует требованиям. Заказчик подтвердил приёмку — претензий нет. Версия 1.4.10 включает оптимизации индекса и переработанный кэш.",
+  "expected": {}
+}

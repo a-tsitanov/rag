@@ -1,0 +1,12 @@
+{
+  "name": "phones_variety",
+  "description": "Mixed phone formats — same canonical from multiple writings.",
+  "text": "Телефоны: +7 (495) 234-56-78 (основной), 8-495-234-56-78 (резервный, тот же номер), мобильный +7 921 555-44-33, факс +7 495 100-20-30.",
+  "expected": {
+    "PhoneNumber": [
+      "+74952345678",
+      "+79215554433",
+      "+74951002030"
+    ]
+  }
+}

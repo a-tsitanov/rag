@@ -27,7 +27,7 @@ from loguru import logger
 
 from src.config import settings
 from src.llm_client import LLMClient
-from src.models.search import SearchResponse, SourceCitation
+from src.models.search import AgenticRoundStat, SearchResponse, SourceCitation
 from src.retrieval.hybrid_search import HybridSearcher, SearchMode
 
 # ── prompts ──────────────────────────────────────────────────────────
@@ -104,6 +104,58 @@ def _build_graph_str(graph_data: dict, max_chars: int = 2000) -> str:
 
     result = "\n\n".join(parts)
     return result[:max_chars] if len(result) > max_chars else result
+
+
+_DEFAULT_HL_KEYWORD_LIMIT = 30
+
+
+def _accumulated_hl_keywords(
+    graph_data: dict, limit: int = _DEFAULT_HL_KEYWORD_LIMIT,
+) -> list[str]:
+    """Top-N entity names from accumulated graph data, dedup-preserving order.
+
+    Entities in ``graph_data`` are already deduplicated by name (see
+    ``_merge_graph_data``); their order tracks the LightRAG retrieval
+    ranking from the round that first surfaced each one.  We trim to
+    ``limit`` to keep the keyword list focused — too many keywords
+    dilute the retrieval signal LightRAG normally derives via its own
+    keyword-extraction LLM call.
+    """
+    data = graph_data.get("data", graph_data)
+    names: list[str] = []
+    seen: set[str] = set()
+    for ent in data.get("entities", []):
+        name = (ent.get("entity_name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+        if len(names) >= limit:
+            break
+    return names
+
+
+def _build_enriched_query(query: str, follow_ups: list[str]) -> str:
+    """Original query + appended LLM-judge follow-ups.
+
+    Empty/no-follow-up case returns the original verbatim — we never
+    add a hollow "Related sub-queries:" header.  Duplicate follow-ups
+    are dropped because a few judge implementations occasionally
+    re-emit a previous query.
+    """
+    if not follow_ups:
+        return query
+    seen: set[str] = {query}
+    extras: list[str] = []
+    for fu in follow_ups:
+        fu = (fu or "").strip()
+        if not fu or fu in seen:
+            continue
+        seen.add(fu)
+        extras.append(fu)
+    if not extras:
+        return query
+    return query + "\n\nRelated sub-queries:\n- " + "\n- ".join(extras)
 
 
 def _merge_graph_data(accumulated: dict, new: dict) -> dict:
@@ -224,6 +276,7 @@ async def agentic_search(
     all_sources: list[SourceCitation] = []
     all_graph_data: dict = {}
     follow_up_queries: list[str] = []
+    round_stats: list[AgenticRoundStat] = []
     current_query = query
     rounds = 0
 
@@ -257,6 +310,15 @@ async def agentic_search(
     for round_num in range(1, max_rounds + 1):
         rounds = round_num
 
+        # snapshot pre-aggregation counts for delta tracking
+        prev_sources_n = len(all_sources)
+        prev_entities_n = len(
+            all_graph_data.get("data", {}).get("entities", [])
+        )
+        prev_relations_n = len(
+            all_graph_data.get("data", {}).get("relationships", [])
+        )
+
         # a. vector search (no RAG LLM call)
         resp = await searcher.search(current_query, **search_kwargs)
         all_sources.extend(resp.sources)
@@ -275,12 +337,43 @@ async def agentic_search(
             all_graph_data.get("data", {}).get("relationships", [])
         )
 
+        new_sources = len(all_sources) - prev_sources_n
+        new_entities = entities_count - prev_entities_n
+        new_relations = relations_count - prev_relations_n
+
         logger.info(
-            "agentic round={round}  query={q!r}  sources={src}  "
-            "entities={ent}  relations={rel}",
+            "agentic round={round}  query={q!r}  sources={src} (+{ns})  "
+            "entities={ent} (+{ne})  relations={rel} (+{nr})",
             round=round_num, q=current_query,
             src=len(all_sources), ent=entities_count, rel=relations_count,
+            ns=new_sources, ne=new_entities, nr=new_relations,
         )
+
+        # Stage G: short-circuit on barren follow-up rounds.  If round N
+        # (N>1) didn't add a single chunk, entity, or relation the judge
+        # has nothing new to evaluate either — skip the LLM call and
+        # exit.  Round 1 always proceeds to judge (initial assessment).
+        if (
+            round_num > 1
+            and new_sources == 0
+            and new_entities == 0
+            and new_relations == 0
+        ):
+            logger.info(
+                "agentic round={round}  early exit — no new info from "
+                "follow-up query  skipping judge",
+                round=round_num,
+            )
+            round_stats.append(AgenticRoundStat(
+                round=round_num,
+                query=current_query,
+                new_sources=new_sources,
+                new_entities=new_entities,
+                new_relations=new_relations,
+                sufficient=None,  # judge skipped
+                judge_reason="no new info",
+            ))
+            break
 
         # c. judge (LLM call) — sees both chunks and graph data
         judgment = await _judge_context(
@@ -295,6 +388,16 @@ async def agentic_search(
             fup=judgment.get("follow_up_query", ""),
         )
 
+        round_stats.append(AgenticRoundStat(
+            round=round_num,
+            query=current_query,
+            new_sources=new_sources,
+            new_entities=new_entities,
+            new_relations=new_relations,
+            sufficient=bool(judgment["sufficient"]),
+            judge_reason=str(judgment.get("reason", "")),
+        ))
+
         if judgment["sufficient"]:
             break
 
@@ -305,8 +408,23 @@ async def agentic_search(
         current_query = follow_up
 
     # d. final answer: LightRAG full pipeline (graph + LLM synthesis)
+    #
+    # Stage F: feed accumulated context back into the final synthesis
+    # so the rounds aren't wasted.  Two channels:
+    #   * `hl_keywords` — top entity names from the merged graph data
+    #     across all rounds.  LightRAG normally derives these via an
+    #     LLM keyword-extraction step; supplying them directly skips
+    #     that LLM call AND grounds the final retrieval in what the
+    #     prior probes actually found.
+    #   * `enriched_query` — original query plus the LLM-judge's
+    #     follow-up queries appended as sub-queries.  Widens keyword
+    #     coverage in the retrieval channel without changing
+    #     QueryParam semantics.
+    enriched_query = _build_enriched_query(query, follow_up_queries)
+    hl_keywords = _accumulated_hl_keywords(all_graph_data)
+
     answer = await searcher._ask_rag(
-        query, mode,
+        enriched_query, mode,
         top_k=top_k,
         chunk_top_k=chunk_top_k,
         max_entity_tokens=max_entity_tokens,
@@ -314,15 +432,17 @@ async def agentic_search(
         max_total_tokens=max_total_tokens,
         response_type=response_type,
         include_references=include_references,
+        hl_keywords=hl_keywords or None,
     )
 
     latency_ms = (time.monotonic() - t0) * 1000.0
 
     logger.info(
         "agentic done  rounds={rounds}  total_sources={n}  "
-        "follow_ups={fups}  latency_ms={ms:.1f}",
+        "follow_ups={fups}  hl_keywords={hl}  latency_ms={ms:.1f}",
         rounds=rounds, n=len(all_sources),
-        fups=follow_up_queries, ms=latency_ms,
+        fups=follow_up_queries, hl=len(hl_keywords),
+        ms=latency_ms,
     )
 
     return SearchResponse(
@@ -333,4 +453,5 @@ async def agentic_search(
         latency_ms=latency_ms,
         agentic_rounds=rounds,
         follow_up_queries=follow_up_queries if follow_up_queries else None,
+        agentic_round_stats=round_stats if round_stats else None,
     )

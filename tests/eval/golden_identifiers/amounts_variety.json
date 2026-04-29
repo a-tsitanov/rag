@@ -1,0 +1,13 @@
+{
+  "name": "amounts_variety",
+  "description": "Various ruble notations including multipliers (тыс/млн).",
+  "text": "Стоимость: 4 250 000,00 руб. Аванс: 850 тыс. руб. Штраф: 99,99 ₽ за день. Бюджет: 1,5 млн руб. на год.",
+  "expected": {
+    "Amount": [
+      "4250000.00 RUB",
+      "850000.00 RUB",
+      "99.99 RUB",
+      "1500000.00 RUB"
+    ]
+  }
+}
